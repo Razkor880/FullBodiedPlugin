@@ -4,4 +4,4 @@
 
 void RegisterAnimationEventSink(RE::Actor* actor);  //  Required declaration
 void RegisterPlayerAnimationEventSink();            // Optional wrapper for player
-void ShrinkHead(RE::Actor* actor);                  // Already exists
+void ShrinkHead(RE::Actor* actor, float scale);
