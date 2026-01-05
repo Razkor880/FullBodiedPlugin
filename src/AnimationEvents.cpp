@@ -1,30 +1,21 @@
+// AnimationEvents.cpp
+//
+// Minimal paired-safe trigger for pa_HugA / paired_huga.hkx:
+// - Use the paired event "PairStart" as the trigger (it is commonly forwarded in paired contexts).
+// - When PairStart fires, shrink the actor's head node to 0.25.
+// - No float variables, no payload parsing, no BDI, no polling.
+
 #include "AnimationEvents.h"
 
-#include "RE/Skyrim.h"
 #include "SKSE/SKSE.h"
 
 #include <spdlog/spdlog.h>
 #include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <mutex>
 
 namespace
 {
-    // --- NEW: helper to read anim var float ---
-    static bool GetAnimVarFloat(RE::Actor* actor, const char* name, float& out)
-    {
-        if (!actor) {
-            return false;
-        }
-        return actor->GetGraphVariableFloat(name, out);
-    }
-
-    // --- NEW: per-actor latch to make the float pulse fire once ---
-    static std::unordered_map<RE::FormID, bool> g_varLatch;
-
-    // Name of the variable as set in your HKX annotations
-    static constexpr const char* kVar_HeadShrink = "FB_HeadShrinkValue";
+    static constexpr std::string_view kTriggerTag = "KillMoveStart";
+    static constexpr float kHeadScale = 0.25f;
 
     class AnimationEventSink : public RE::BSTEventSink<RE::BSAnimationGraphEvent>
     {
@@ -44,75 +35,19 @@ namespace
 
             const std::string_view tag{ a_event->tag.c_str(), a_event->tag.size() };
 
-            // Optional: log only FB_ tags to avoid insane spam
-            if (tag.rfind("FB_", 0) == 0) {
-                spdlog::info("[AnimSink] actor={} tag='{}'", actor->GetName(), a_event->tag.c_str());
-            }
+            // Minimal debug logging: prove the paired event is arriving.
+            if (tag == kTriggerTag) {
+                spdlog::info("[FB] {} on {} -> ShrinkHead(scale={})",
+                    a_event->tag.c_str(), actor->GetName(), kHeadScale);
 
-            // Catch anything containing HeadShrink (helps confirm annotation is arriving at all)
-            if (tag.find("HeadShrink") != std::string_view::npos) {
-                spdlog::info("[DBG] Saw tag containing 'HeadShrink': actor={} tag='{}'",
-                    actor->GetName(), a_event->tag.c_str());
-            }
-
-            // Known-good trigger: KillMoveStart
-            if (tag == "PairEnd") {
-                float v = 0.0f;
-                const bool hasV = GetAnimVarFloat(actor, "FB_HeadShrinkValue", v);
-
-                actor->SetGraphVariableFloat("FB_HeadShrinkValue", 0.25f);
-
-                float check = 0.0f;
-                bool ok = actor->GetGraphVariableFloat("FB_HeadShrinkValue", check);
-                spdlog::info("[KM] after SetGraphVariableFloat ok={} value={}", ok ? 1 : 0, check);
-
-
-
-                spdlog::info("[KM] KillMoveStart on {}  hasVar={} FB_HeadShrinkValue={}",
-                    actor->GetName(), hasV ? 1 : 0, v);
-
-                // Probe likely alt name
-                float v2 = 0.0f;
-                const bool hasV2 = GetAnimVarFloat(actor, "FB_HeadShrink", v2);
-                spdlog::info("[KM] probe FB_HeadShrink hasVar={} value={}", hasV2 ? 1 : 0, v2);
-
-                float scale = 0.0f;
-                if (hasV && v > 0.0f) {
-                    scale = v;
-                }
-                else if (hasV2 && v2 > 0.0f) {
-                    scale = v2;
-                }
-
-                if (scale > 0.0f) {
-                    if (scale < 0.05f) scale = 0.05f;
-                    if (scale > 3.00f) scale = 3.00f;
-
-                    spdlog::info("[KM] CALL ShrinkHead(actor='{}', scale={})", actor->GetName(), scale);
-                    ShrinkHead(actor, scale);
-                }
+                ShrinkHead(actor, kHeadScale);
             }
 
             return RE::BSEventNotifyControl::kContinue;
         }
-
-
-
-
-
     };
 
     AnimationEventSink g_animationEventSink;
-
-    // One-shot guard so we don't spam re-apply (optional but recommended)
-    std::mutex g_onceMtx;
-    std::unordered_set<RE::FormID> g_shrunk;
-
-    bool MarkOnce(RE::Actor* actor)
-    {
-        std::scoped_lock lock(g_onceMtx);
-        return g_shrunk.insert(actor->GetFormID()).second;
-    }
 }
 
 void RegisterAnimationEventSink(RE::Actor* actor)
@@ -123,6 +58,7 @@ void RegisterAnimationEventSink(RE::Actor* actor)
 
     RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
     if (!actor->GetAnimationGraphManager(manager) || !manager) {
+        spdlog::warn("RegisterAnimationEventSink: no animation graph manager");
         return;
     }
 
@@ -130,25 +66,19 @@ void RegisterAnimationEventSink(RE::Actor* actor)
         if (!graph) {
             continue;
         }
-
         graph->AddEventSink<RE::BSAnimationGraphEvent>(&g_animationEventSink);
     }
+
+    spdlog::info("Registered animation sinks to actor={}", actor->GetName());
 }
 
-
 void ShrinkHead(RE::Actor* actor, float scale)
-
 {
     if (!actor) {
         return;
     }
 
-    // One-shot per actor (comment out if you want it repeatable)
-    if (!MarkOnce(actor)) {
-        return;
-    }
-
-    // Safer: defer node edits to a task (avoids touching scene graph mid-update)
+    // Defer node edits to SKSE task queue (avoids touching scene graph mid-update)
     const auto handle = actor->CreateRefHandle();
     if (auto* task = SKSE::GetTaskInterface()) {
         task->AddTask([handle, scale]() {
@@ -162,10 +92,15 @@ void ShrinkHead(RE::Actor* actor, float scale)
                 return;
             }
 
+            // Most reliable vanilla head node name
             auto headNode = root->GetObjectByName("NPC Head [Head]");
             if (!headNode) {
+                spdlog::info("[FB] ShrinkHead: head node not found for '{}'", actorPtr->GetName());
                 return;
             }
+
+            spdlog::info("[FB] ShrinkHead: actor='{}' node='{}' oldScale={} newScale={}",
+                actorPtr->GetName(), headNode->name.c_str(), headNode->local.scale, scale);
 
             headNode->local.scale = scale;
             });
