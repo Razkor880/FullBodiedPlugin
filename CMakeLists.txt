@@ -22,21 +22,21 @@ project(FullBodiedPlugin VERSION 0.0.1 LANGUAGES CXX)
 # To do this automatically, set the `SKYRIM_FOLDER` environment variable
 # to the path of your Skyrim Special Edition folder
 if(DEFINED ENV{SKYRIM_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_FOLDER}/Data")
-    set(OUTPUT_FOLDER "C:/Wabbajack Lists/SME/mods/Full Bodied Animations")
+    set(OUTPUT_FOLDER "$ENV{SKYRIM_FOLDER}/Data")
 endif()
 
 # If you're using Mod Organizer 2 or Vortex, you might want this to go inside
 # of your "mods" folder, inside of a subfolder named "<your mod>".
-#
+
 # To do this automatically, set the `SKYRIM_MODS_FOLDER` environment variable
 # to the path of your "mods" folder
 if(DEFINED ENV{SKYRIM_MODS_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_MODS_FOLDER}")
-    set(OUTPUT_FOLDER "C:/Wabbajack Lists/SME/mods/Full Bodied Animations")
+    set(OUTPUT_FOLDER "$ENV{SKYRIM_MODS_FOLDER}/${PROJECT_NAME}")
 endif()
 
 # Otherwise, you can set OUTPUT_FOLDER to any place you'd like :)
 # set(OUTPUT_FOLDER "C:/path/to/any/folder")
-
+set(OUTPUT_FOLDER "C:/Wabbajack Lists/SME2/mods/Full Bodied Animations")
 # Setup your SKSE plugin as an SKSE plugin!
 find_package(CommonLibSSE CONFIG REQUIRED)
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
