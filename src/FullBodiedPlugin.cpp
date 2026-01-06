@@ -45,9 +45,9 @@ namespace
 
 		// Optional (but nice): parse INI once up front so the first event doesn't "pay" for it.
 		// This is the function we added in AnimationEvents.h / AnimationEvents.cpp.
-		LoadHeadShrinkConfig();
+		LoadHeadScaleConfig();
 
-		// 1) Head-shrink sink (FB_HeadShrinkS### + config-driven timelines)
+		// 1) Head scale sink (FB_HeadScaleS### + config-driven timelines)
 		RegisterAnimationEventSink(player);
 
 		// 2) Your debug/logger sink (prints tags you care about)

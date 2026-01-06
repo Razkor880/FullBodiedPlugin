@@ -2,16 +2,16 @@
 //
 // Consolidated version (caster + target head scale timelines driven by INI)
 //
-// Behavior/Graph emits ONLY: FB_HeadShrink  (start timeline immediately)
+// Behavior/Graph emits ONLY: FB_HeadScale  (start timeline immediately)
 //
 // INI layout (must look like this):
 //
-//   [CasterHeadSize]
+//   [CasterHeadScale]
 //   ; timeSeconds   HeadScaleS###
 //   0.000000 HeadScaleS100
 //   12.000000 HeadScaleS100
 //
-//   [TargetHeadSize]
+//   [TargetHeadScale]
 //   ; timeSeconds   2_HeadScaleS###
 //   0.000000 2_HeadScaleS100
 //   5.000000 2_HeadScaleS025
@@ -24,7 +24,7 @@
 // Notes:
 // - Worker threads sleep; actual scene graph edits are queued via SKSE task interface.
 // - Per-caster token cancels old scheduled actions.
-// - Debounce prevents double-scheduling if FB_HeadShrink fires twice rapidly (common with multiple graphs).
+// - Debounce prevents double-scheduling if FB_HeadScale fires twice rapidly (common with multiple graphs).
 
 #include "AnimationEvents.h"
 
@@ -53,7 +53,7 @@ namespace
 	// =========================
 	// Constants / naming
 	// =========================
-	static constexpr std::string_view kStartEvent = "FB_HeadShrink";
+	static constexpr std::string_view kStartEvent = "FB_HeadScale";
 
 	// Reset reinforcement tags:
 	static constexpr std::string_view kPairEndEvent = "PairEnd";
@@ -72,7 +72,7 @@ namespace
 	// Target search radius (paired idles are very close; tune as needed)
 	static constexpr float kTargetSearchRadius = 250.0f;
 
-	// Debounce window for duplicate FB_HeadShrink starts (seconds)
+	// Debounce window for duplicate FB_HeadScale starts (seconds)
 	static constexpr float kStartDebounceSeconds = 0.20f;
 
 	// =========================
@@ -327,7 +327,7 @@ namespace
 				TrimInPlace(key);
 				TrimInPlace(val);
 
-				if (IEquals(key, "bEnableHeadShrinkTimelines")) {
+				if (IEquals(key, "bEnableHeadScaleTimelines")) {
 					newCfg.enableTimelines = ParseBool(val, newCfg.enableTimelines);
 				}
 				else if (IEquals(key, "bResetOnPairEnd")) {
@@ -355,9 +355,9 @@ namespace
 				continue;
 			}
 
-			// [CasterHeadSize] / [TargetHeadSize]
-			const bool isCasterSection = IEquals(currentSection, "CasterHeadSize");
-			const bool isTargetSection = IEquals(currentSection, "TargetHeadSize");
+			// [CasterHeadScale] / [TargetHeadScale]
+			const bool isCasterSection = IEquals(currentSection, "CasterHeadScale");
+			const bool isTargetSection = IEquals(currentSection, "TargetHeadScale");
 			if (isCasterSection || isTargetSection) {
 				std::istringstream iss(line);
 				std::string timeTok;
@@ -373,8 +373,8 @@ namespace
 				}
 
 				// Enforce your intended INI style:
-				// - CasterHeadSize should NOT start with "2_"
-				// - TargetHeadSize should start with "2_"
+				// - CasterHeadScale should NOT start with "2_"
+				// - TargetHeadScale should start with "2_"
 				if (isCasterSection && cmdTok.rfind("2_", 0) == 0) {
 					spdlog::warn("[FB] INI: '{}' contains target-prefixed cmd '{}' (ignored)", currentSection, cmdTok);
 					continue;
@@ -672,7 +672,7 @@ namespace
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
-			// Start timeline on FB_HeadShrink
+			// Start timeline on FB_HeadScale
 			if (tag == kStartEvent) {
 				StartTimelineForCaster(caster, tag);
 				return RE::BSEventNotifyControl::kContinue;
@@ -710,7 +710,7 @@ void RegisterAnimationEventSink(RE::Actor* actor)
 	spdlog::info("Registered animation sinks to actor={}", actor->GetName());
 }
 
-void ShrinkHead(RE::Actor* actor, float scale)
+void HeadScale(RE::Actor* actor, float scale)
 {
 	// Legacy compatibility
 	if (actor) {
@@ -718,7 +718,7 @@ void ShrinkHead(RE::Actor* actor, float scale)
 	}
 }
 
-void LoadHeadShrinkConfig()
+void LoadHeadScaleConfig()
 {
 	// Optional eager-load hook (call from FullBodiedPlugin.cpp)
 	(void)GetConfig();
