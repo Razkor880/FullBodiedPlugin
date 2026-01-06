@@ -1,55 +1,13 @@
-// AnimationEvents.cpp
-//
-// FullBodiedPlugin – FB INI timeline parser (Scale + Vis)
-//
-// INI file name: FullBodiedIni.ini
-// Preferred: Data\FullBodiedIni.ini
-// Fallback:  Data\SKSE\Plugins\FullBodiedIni.ini
-//
-// Event mapping:
-//   [EventToTimeline]
-//   <StartEventTag> = <TimelineName>
-//
-// Example:
-//   FBEvent = paired_huga.hkx
-//
-// Timeline sections (2-part):
-//   [FB:paired_huga.hkx|Caster]
-//   0.000000 FBScale_Head(1.0)
-//
-//   [FB:paired_huga.hkx|Target]
-//   0.000000 2_FBScale_Head(1.0)
-//
-// Token format (canonical):
-//   FBScale_<NodeKey>(<floatMultiplier>)
-//   2_FBScale_<NodeKey>(<floatMultiplier>)
-//
-// Visibility (FBVis):
-//   FBVis_<Key>(true/false)
-//   2_FBVis_<Key>(true/false)
-//
-// Visibility groups:
-//   [FBVisGroups]
-//   Pelvis = 3BA_PelvisShape, MyOutfit_Pelvis
-
 #include "AnimationEvents.h"
-
-#include "FBScaler.h"
-#include "FBVis.h"
-
-#include "RE/Skyrim.h"
-#include "SKSE/SKSE.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cctype>
-#include <cstdint>
-#include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -59,29 +17,61 @@
 #include <utility>
 #include <vector>
 
-#include <spdlog/spdlog.h>
+#include "RE/Skyrim.h"
+#include "SKSE/SKSE.h"
+#include "spdlog/spdlog.h"
+
+#include "FBCommandRouter.h"
+#include "FBScaler.h"
+#include "FBVis.h"
 
 namespace
 {
-	// =========================
-	// Constants
-	// =========================
-	static constexpr float kTargetSearchRadius = 160.0f;  // tweak if needed
-	static constexpr float kStartDebounceSeconds = 0.10f;
-	static constexpr std::string_view kTargetPrefix = "2_";
+	using TargetKind = FB::CommandRouter::TargetKind;
+	using CommandType = FB::CommandRouter::CommandType;
+	using Command = FB::CommandRouter::Command;
+	using RouterContext = FB::CommandRouter::Context;
 
-	// =========================
-	// Helpers (string)
-	// =========================
-	static void TrimInPlace(std::string& s)
+	// Default max range (in game units) for distance-based target resolution.
+	// 1 unit â‰ˆ 1/70th foot (Skyrim units). 250 is "very close" for a paired animation.
+	constexpr float kDefaultTargetResolveMaxDist = 250.0f;
+
+	struct DebugCfg
 	{
-		auto is_ws = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-		while (!s.empty() && is_ws(static_cast<unsigned char>(s.front()))) {
-			s.erase(s.begin());
-		}
-		while (!s.empty() && is_ws(static_cast<unsigned char>(s.back()))) {
-			s.pop_back();
-		}
+		bool logOps{ true };
+		bool strictIni{ false };
+	};
+
+	struct Config
+	{
+		bool enableTimelines{ true };
+		bool resetOnPairEnd{ true };
+		bool resetOnPairedStop{ true };
+
+		float targetResolveMaxDist{ kDefaultTargetResolveMaxDist };
+
+		DebugCfg dbg{};
+
+		// Animation event tag -> timeline name
+		std::unordered_map<std::string, std::string> eventToTimeline;
+
+		// timeline name -> commands
+		std::unordered_map<std::string, std::vector<Command>> timelines;
+
+		// vis group key -> list of exact object names
+		std::unordered_map<std::string, std::vector<std::string>> visGroups;
+	};
+
+	static std::shared_mutex g_cfgLock;
+	static Config g_cfg;
+
+	static std::string Trim(std::string s)
+	{
+		auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+
+		s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+		s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+		return s;
 	}
 
 	static bool IEquals(std::string_view a, std::string_view b)
@@ -90,877 +80,417 @@ namespace
 			return false;
 		}
 		for (std::size_t i = 0; i < a.size(); ++i) {
-			const auto ca = static_cast<unsigned char>(a[i]);
-			const auto cb = static_cast<unsigned char>(b[i]);
-			if (std::tolower(ca) != std::tolower(cb)) {
+			if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	static std::optional<float> ParseFloat(std::string s)
+	static bool TryParseBool(std::string_view s, bool& out)
 	{
-		TrimInPlace(s);
-		if (s.empty()) {
-			return std::nullopt;
-		}
-		char* end = nullptr;
-		const float f = std::strtof(s.c_str(), &end);
-		if (!end || end == s.c_str()) {
-			return std::nullopt;
-		}
-		return f;
-	}
-
-	static bool ParseBool(const std::string& v, bool fallback)
-	{
-		std::string s = v;
-		TrimInPlace(s);
-		if (s.empty()) {
-			return fallback;
-		}
-		if (IEquals(s, "1") || IEquals(s, "true") || IEquals(s, "yes") || IEquals(s, "on")) {
+		std::string t(s);
+		t = Trim(std::move(t));
+		if (IEquals(t, "true") || t == "1" || IEquals(t, "yes") || IEquals(t, "on")) {
+			out = true;
 			return true;
 		}
-		if (IEquals(s, "0") || IEquals(s, "false") || IEquals(s, "no") || IEquals(s, "off")) {
-			return false;
-		}
-		return fallback;
-	}
-
-	static void StripInlineComment(std::string& line)
-	{
-		for (std::size_t i = 0; i < line.size(); ++i) {
-			if (line[i] == ';' || line[i] == '#') {
-				line.resize(i);
-				return;
-			}
-		}
-	}
-
-	static std::vector<std::string> Split(const std::string& s, char delim)
-	{
-		std::vector<std::string> out;
-		std::string cur;
-		std::stringstream ss(s);
-		while (std::getline(ss, cur, delim)) {
-			out.push_back(cur);
-		}
-		return out;
-	}
-
-	// =========================
-	// Commands / Config model
-	// =========================
-	enum class TargetKind
-	{
-		kCaster,
-		kTarget
-	};
-
-	enum class CommandType
-	{
-		kScale,
-		kVis
-	};
-
-	struct DebugConfig
-	{
-		bool logOps{ true };
-		bool strictIni{ false };
-		bool logEventTags{ false };
-		bool logTimelineStart{ true };
-		bool logTargetResolve{ false };
-	};
-
-	struct Command
-	{
-		TargetKind target{ TargetKind::kCaster };
-		CommandType type{ CommandType::kScale };
-		float timeSeconds{ 0.0f };
-
-		// Scale: points to FB::Scaler::kNode* constants (static lifetime).
-		std::string_view nodeName{};
-
-		// Vis: group key from [FBVisGroups] OR literal object name.
-		// Owns memory because Command is stored long-term.
-		std::string visKey{};
-
-		// Payload
-		float scale{ 1.0f };
-		bool visible{ true };
-	};
-
-	struct Config
-	{
-		bool enableTimelines{ true };
-		bool resetOnPairEnd{ true };
-		bool resetOnPairedStop{ true };
-		DebugConfig dbg{};
-
-		// Event tag -> Timeline name
-		std::unordered_map<std::string, std::string> eventToTimeline;
-
-		// Timeline name -> commands
-		std::unordered_map<std::string, std::vector<Command>> timelines;
-
-		// Vis groups: key -> exact object names
-		std::unordered_map<std::string, std::vector<std::string>> visGroups;
-	};
-
-	std::mutex g_cfgMutex;
-	Config g_cfg;
-	bool g_cfgLoaded = false;
-
-	static void SortAndClamp(std::vector<Command>& cmds)
-	{
-		for (auto& c : cmds) {
-			if (c.timeSeconds < 0.0f) {
-				c.timeSeconds = 0.0f;
-			}
-		}
-		std::sort(cmds.begin(), cmds.end(), [](const auto& a, const auto& b) { return a.timeSeconds < b.timeSeconds; });
-	}
-
-	static std::string GetConfigPathPreferred()
-	{
-		return "Data\\FullBodiedIni.ini";
-	}
-
-	static std::string GetConfigPathFallback()
-	{
-		return "Data\\SKSE\\Plugins\\FullBodiedIni.ini";
-	}
-
-	// =========================
-	// NodeKey -> skeleton NiNode name (Scale)
-	// =========================
-	static std::optional<std::string_view> ResolveNodeKey(std::string_view key)
-	{
-		if (IEquals(key, "Head")) {
-			return FB::Scaler::kNodeHead;
-		}
-		if (IEquals(key, "Pelvis")) {
-			return FB::Scaler::kNodePelvis;
-		}
-		if (IEquals(key, "Spine")) {
-			return FB::Scaler::kNodeSpine0;
-		}
-		if (IEquals(key, "Spine1")) {
-			return FB::Scaler::kNodeSpine1;
-		}
-		if (IEquals(key, "Spine2")) {
-			return FB::Scaler::kNodeSpine2;
-		}
-		if (IEquals(key, "Neck")) {
-			return FB::Scaler::kNodeNeck;
-		}
-		if (IEquals(key, "LForearm")) {
-			return FB::Scaler::kNodeLForearm;
-		}
-		if (IEquals(key, "RForearm")) {
-			return FB::Scaler::kNodeRForearm;
-		}
-		if (IEquals(key, "LHand")) {
-			return FB::Scaler::kNodeLHand;
-		}
-		if (IEquals(key, "RHand")) {
-			return FB::Scaler::kNodeRHand;
-		}
-		if (IEquals(key, "LUpperArm")) {
-			return FB::Scaler::kNodeLUpperArm;
-		}
-		if (IEquals(key, "RUpperArm")) {
-			return FB::Scaler::kNodeRUpperArm;
-		}
-		if (IEquals(key, "LThigh")) {
-			return FB::Scaler::kNodeLThigh;
-		}
-		if (IEquals(key, "RThigh")) {
-			return FB::Scaler::kNodeRThigh;
-		}
-		if (IEquals(key, "LCalf")) {
-			return FB::Scaler::kNodeLCalf;
-		}
-		if (IEquals(key, "RCalf")) {
-			return FB::Scaler::kNodeRCalf;
-		}
-		if (IEquals(key, "LFoot")) {
-			return FB::Scaler::kNodeLFoot;
-		}
-		if (IEquals(key, "RFoot")) {
-			return FB::Scaler::kNodeRFoot;
-		}
-		return std::nullopt;
-	}
-
-	// =========================
-	// Parse tokens
-	// =========================
-	struct ParsedScale
-	{
-		std::string_view nodeName{};
-		float scale{ 1.0f };
-	};
-
-	static std::optional<ParsedScale> TryParseScaleToken(std::string_view tok, bool strictIni)
-	{
-		const std::string_view prefix = "FBScale_";
-		if (tok.rfind(prefix, 0) != 0) {
-			return std::nullopt;
-		}
-
-		const size_t open = tok.find('(');
-		const size_t close = tok.rfind(')');
-		if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1 || close != tok.size() - 1) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: bad call syntax '{}'", std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		if (open <= prefix.size()) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: missing NodeKey in '{}'", std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		const std::string_view nodeKey = tok.substr(prefix.size(), open - prefix.size());
-		auto nodeName = ResolveNodeKey(nodeKey);
-		if (!nodeName) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: unknown NodeKey '{}' in '{}'", std::string(nodeKey), std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		std::string arg = std::string(tok.substr(open + 1, close - (open + 1)));
-		auto f = ParseFloat(arg);
-		if (!f) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: bad float '{}' in '{}'", arg, std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		ParsedScale out;
-		out.nodeName = *nodeName;
-		out.scale = *f;
-		return out;
-	}
-
-	struct ParsedVis
-	{
-		std::string key;
-		bool visible{ true };
-	};
-
-	static std::optional<ParsedVis> TryParseVisToken(std::string_view tok, bool strictIni)
-	{
-		const std::string_view prefix = "FBVis_";
-		if (tok.rfind(prefix, 0) != 0) {
-			return std::nullopt;
-		}
-
-		const size_t open = tok.find('(');
-		const size_t close = tok.rfind(')');
-		if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1 || close != tok.size() - 1) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: bad call syntax '{}'", std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		std::string key{ tok.substr(prefix.size(), open - prefix.size()) };
-		TrimInPlace(key);
-		if (key.empty()) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: FBVis missing key in '{}'", std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		std::string arg{ tok.substr(open + 1, close - (open + 1)) };
-		TrimInPlace(arg);
-
-		ParsedVis out;
-		out.key = std::move(key);
-		out.visible = ParseBool(arg, true);
-		return out;
-	}
-
-	static std::optional<Command> ParseCommand(float t, const std::string& cmdTok, TargetKind who, bool strictIni)
-	{
-		// Enforce 2_ prefix rule for target section.
-		if (who == TargetKind::kTarget) {
-			if (cmdTok.rfind(std::string(kTargetPrefix), 0) != 0) {
-				if (strictIni) {
-					spdlog::warn("[FB] INI: Target section requires '2_' prefix, got '{}'", cmdTok);
-				}
-				return std::nullopt;
-			}
-
-			std::string_view inner{ cmdTok.c_str() + kTargetPrefix.size(), cmdTok.size() - kTargetPrefix.size() };
-
-			if (auto s = TryParseScaleToken(inner, strictIni)) {
-				Command c;
-				c.target = TargetKind::kTarget;
-				c.type = CommandType::kScale;
-				c.timeSeconds = t;
-				c.nodeName = s->nodeName;
-				c.scale = s->scale;
-				return c;
-			}
-
-			if (auto v = TryParseVisToken(inner, strictIni)) {
-				Command c;
-				c.target = TargetKind::kTarget;
-				c.type = CommandType::kVis;
-				c.timeSeconds = t;
-				c.visKey = std::move(v->key);
-				c.visible = v->visible;
-				return c;
-			}
-
-			if (strictIni) {
-				spdlog::warn("[FB] INI: unsupported/unknown target token '{}'", cmdTok);
-			}
-			return std::nullopt;
-		}
-
-		// Caster section must NOT use 2_
-		if (cmdTok.rfind(std::string(kTargetPrefix), 0) == 0) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: Caster section must NOT use '2_' prefix, got '{}'", cmdTok);
-			}
-			return std::nullopt;
-		}
-
-		if (auto s = TryParseScaleToken(cmdTok, strictIni)) {
-			Command c;
-			c.target = TargetKind::kCaster;
-			c.type = CommandType::kScale;
-			c.timeSeconds = t;
-			c.nodeName = s->nodeName;
-			c.scale = s->scale;
-			return c;
-		}
-
-		if (auto v = TryParseVisToken(cmdTok, strictIni)) {
-			Command c;
-			c.target = TargetKind::kCaster;
-			c.type = CommandType::kVis;
-			c.timeSeconds = t;
-			c.visKey = std::move(v->key);
-			c.visible = v->visible;
-			return c;
-		}
-
-		if (strictIni) {
-			spdlog::warn("[FB] INI: unsupported/unknown caster token '{}'", cmdTok);
-		}
-		return std::nullopt;
-	}
-
-	// =========================
-	// FB section name (2-part)
-	// =========================
-	static bool ParseFBSection(const std::string& section, std::string& outTimelineName, TargetKind& outWho)
-	{
-		if (section.rfind("FB:", 0) != 0) {
-			return false;
-		}
-
-		const auto pipe = section.find('|');
-		if (pipe == std::string::npos) {
-			return false;
-		}
-
-		std::string left = section.substr(3, pipe - 3);
-		std::string right = section.substr(pipe + 1);
-
-		TrimInPlace(left);
-		TrimInPlace(right);
-
-		if (left.empty()) {
-			return false;
-		}
-
-		outTimelineName = left;
-
-		if (IEquals(right, "Caster")) {
-			outWho = TargetKind::kCaster;
-			return true;
-		}
-		if (IEquals(right, "Target")) {
-			outWho = TargetKind::kTarget;
+		if (IEquals(t, "false") || t == "0" || IEquals(t, "no") || IEquals(t, "off")) {
+			out = false;
 			return true;
 		}
 		return false;
 	}
 
-	// =========================
-	// Load INI
-	// =========================
-	static void LoadConfigLocked()
-	{
-		Config newCfg;
-
-		auto path = GetConfigPathPreferred();
-		std::ifstream in(path);
-
-		if (!in.good()) {
-			auto fb = GetConfigPathFallback();
-			in.open(fb);
-			if (in.good()) {
-				path = fb;
-			}
-		}
-
-		if (!in.good()) {
-			spdlog::warn("[FB] Config not found (preferred or fallback). Using defaults.");
-			g_cfg = std::move(newCfg);
-			g_cfgLoaded = true;
-			return;
-		}
-
-		spdlog::info("[FB] Loading config: {}", path);
-
-		std::string currentSection;
-		std::string timelineName;
-		TargetKind sectionWho = TargetKind::kCaster;
-
-		std::string line;
-		while (std::getline(in, line)) {
-			StripInlineComment(line);
-			TrimInPlace(line);
-			if (line.empty()) {
-				continue;
-			}
-
-			// Section header
-			if (line.front() == '[' && line.back() == ']') {
-				currentSection = line.substr(1, line.size() - 2);
-				TrimInPlace(currentSection);
-
-				std::string tl;
-				TargetKind who = TargetKind::kCaster;
-				if (ParseFBSection(currentSection, tl, who)) {
-					timelineName = tl;
-					sectionWho = who;
-					(void)newCfg.timelines[timelineName];
-				}
-				else {
-					// Leaving timeline section
-					timelineName.clear();
-				}
-				continue;
-			}
-
-			// [General]
-			if (IEquals(currentSection, "General")) {
-				auto eq = line.find('=');
-				if (eq == std::string::npos) {
-					continue;
-				}
-				std::string key = line.substr(0, eq);
-				std::string val = line.substr(eq + 1);
-				TrimInPlace(key);
-				TrimInPlace(val);
-
-				if (IEquals(key, "bEnableHeadScaleTimelines")) {
-					newCfg.enableTimelines = ParseBool(val, newCfg.enableTimelines);
-				}
-				else if (IEquals(key, "bResetOnPairEnd")) {
-					newCfg.resetOnPairEnd = ParseBool(val, newCfg.resetOnPairEnd);
-				}
-				else if (IEquals(key, "bResetOnPairedStop")) {
-					newCfg.resetOnPairedStop = ParseBool(val, newCfg.resetOnPairedStop);
-				}
-				continue;
-			}
-
-			// [Debug]
-			if (IEquals(currentSection, "Debug")) {
-				auto eq = line.find('=');
-				if (eq == std::string::npos) {
-					continue;
-				}
-				std::string key = line.substr(0, eq);
-				std::string val = line.substr(eq + 1);
-				TrimInPlace(key);
-				TrimInPlace(val);
-
-				if (IEquals(key, "bLogOps")) {
-					newCfg.dbg.logOps = ParseBool(val, newCfg.dbg.logOps);
-				}
-				else if (IEquals(key, "bStrictIni")) {
-					newCfg.dbg.strictIni = ParseBool(val, newCfg.dbg.strictIni);
-				}
-				else if (IEquals(key, "bLogEventTags")) {
-					newCfg.dbg.logEventTags = ParseBool(val, newCfg.dbg.logEventTags);
-				}
-				else if (IEquals(key, "bLogTimelineStart")) {
-					newCfg.dbg.logTimelineStart = ParseBool(val, newCfg.dbg.logTimelineStart);
-				}
-				else if (IEquals(key, "bLogTargetResolve")) {
-					newCfg.dbg.logTargetResolve = ParseBool(val, newCfg.dbg.logTargetResolve);
-				}
-				continue;
-			}
-
-			// [EventToTimeline]
-			if (IEquals(currentSection, "EventToTimeline")) {
-				auto eq = line.find('=');
-				if (eq == std::string::npos) {
-					continue;
-				}
-				std::string key = line.substr(0, eq);
-				std::string val = line.substr(eq + 1);
-				TrimInPlace(key);
-				TrimInPlace(val);
-				if (!key.empty() && !val.empty()) {
-					newCfg.eventToTimeline[key] = val;
-				}
-				continue;
-			}
-
-			// [FBVisGroups]
-			if (IEquals(currentSection, "FBVisGroups")) {
-				auto eq = line.find('=');
-				if (eq == std::string::npos) {
-					continue;
-				}
-				std::string key = line.substr(0, eq);
-				std::string rhs = line.substr(eq + 1);
-				TrimInPlace(key);
-				TrimInPlace(rhs);
-				if (key.empty()) {
-					continue;
-				}
-
-				auto parts = Split(rhs, ',');
-				std::vector<std::string> names;
-				names.reserve(parts.size());
-				for (auto& p : parts) {
-					TrimInPlace(p);
-					if (!p.empty()) {
-						names.emplace_back(std::move(p));
-					}
-				}
-
-				if (!names.empty()) {
-					newCfg.visGroups[key] = std::move(names);
-					if (newCfg.dbg.logOps) {
-						spdlog::info("[FB] VisGroups: '{}' -> {} entries", key, newCfg.visGroups[key].size());
-					}
-				}
-				else if (newCfg.dbg.strictIni) {
-					spdlog::warn("[FB] VisGroups: '{}' has no entries", key);
-				}
-				continue;
-			}
-
-			// FB timeline body
-			if (!timelineName.empty()) {
-				std::stringstream ss(line);
-				std::string tStr;
-				std::string cmdTok;
-
-				ss >> tStr;
-				ss >> cmdTok;
-
-				if (tStr.empty() || cmdTok.empty()) {
-					if (newCfg.dbg.strictIni) {
-						spdlog::warn("[FB] INI: bad timeline line '{}'", line);
-					}
-					continue;
-				}
-
-				auto t = ParseFloat(tStr);
-				if (!t) {
-					if (newCfg.dbg.strictIni) {
-						spdlog::warn("[FB] INI: bad time '{}' in '{}'", tStr, line);
-					}
-					continue;
-				}
-
-				auto c = ParseCommand(*t, cmdTok, sectionWho, newCfg.dbg.strictIni);
-				if (c) {
-					newCfg.timelines[timelineName].push_back(std::move(*c));
-				}
-				continue;
-			}
-		}
-
-		for (auto& [name, cmds] : newCfg.timelines) {
-			SortAndClamp(cmds);
-		}
-
-		spdlog::info("[FB] Config loaded: enableTimelines={} resetOnPairEnd={} resetOnPairedStop={} eventMaps={} timelines={} visGroups={}",
-			newCfg.enableTimelines,
-			newCfg.resetOnPairEnd,
-			newCfg.resetOnPairedStop,
-			newCfg.eventToTimeline.size(),
-			newCfg.timelines.size(),
-			newCfg.visGroups.size());
-
-		g_cfg = std::move(newCfg);
-		g_cfgLoaded = true;
-	}
-
-	static const Config& GetConfig()
-	{
-		std::lock_guard _{ g_cfgMutex };
-		if (!g_cfgLoaded) {
-			LoadConfigLocked();
-		}
-		return g_cfg;
-	}
-
-	// Snapshot for safe lambda captures
 	static Config GetConfigCopy()
 	{
-		std::lock_guard _{ g_cfgMutex };
-		if (!g_cfgLoaded) {
-			LoadConfigLocked();
-		}
+		std::shared_lock lk(g_cfgLock);
 		return g_cfg;
 	}
 
-	// =========================
-	// Runtime state per caster
-	// =========================
-	struct ActorState
+	static std::string GetConfigPath()
+	{
+		// Skyrim "Data" relative path
+		return "Data\\FullBodiedIni.ini";
+	}
+
+	static bool ParseFBSection(std::string_view header, std::string& outTimelineName, TargetKind& outDefaultTarget)
+	{
+		// Expected:
+		//   FB:<TimelineName>|Caster
+		//   FB:<TimelineName>|Target
+		//
+		// Example:
+		//   [FB:paired_huga.hkx|Caster]
+		//   [FB:paired_huga.hkx|Target]
+
+		if (!header.starts_with("FB:")) {
+			return false;
+		}
+		header.remove_prefix(3);
+
+		const auto pipe = header.find('|');
+		if (pipe == std::string_view::npos) {
+			return false;
+		}
+
+		std::string_view timeline = header.substr(0, pipe);
+		std::string_view who = header.substr(pipe + 1);
+
+		outTimelineName = std::string(Trim(std::string(timeline)));
+
+		who = std::string_view(Trim(std::string(who)));
+		if (IEquals(who, "Caster")) {
+			outDefaultTarget = TargetKind::kCaster;
+		} else if (IEquals(who, "Target")) {
+			outDefaultTarget = TargetKind::kTarget;
+		} else {
+			return false;
+		}
+
+		return !outTimelineName.empty();
+	}
+
+	static bool TryParseScaleToken(std::string_view token, std::string& outKey, float& outScale)
+	{
+		// FBScale_<Key>(<float>)
+		constexpr std::string_view kPrefix = "FBScale_";
+		if (!token.starts_with(kPrefix)) {
+			return false;
+		}
+		token.remove_prefix(kPrefix.size());
+
+		const auto lparen = token.find('(');
+		const auto rparen = token.rfind(')');
+		if (lparen == std::string_view::npos || rparen == std::string_view::npos || rparen <= lparen) {
+			return false;
+		}
+
+		outKey = std::string(Trim(std::string(token.substr(0, lparen))));
+
+		const auto arg = Trim(std::string(token.substr(lparen + 1, rparen - lparen - 1)));
+		try {
+			outScale = std::stof(arg);
+		} catch (...) {
+			return false;
+		}
+
+		return !outKey.empty();
+	}
+
+	static bool TryParseVisToken(std::string_view token, std::string& outKey, bool& outVisible)
+	{
+		// FBVis_<Key>(true|false)
+		// FBVisible_<Key>(true|false)  (alias)
+		std::string_view prefix;
+		if (token.starts_with("FBVis_")) {
+			prefix = "FBVis_";
+		} else if (token.starts_with("FBVisible_")) {
+			prefix = "FBVisible_";
+		} else {
+			return false;
+		}
+
+		token.remove_prefix(prefix.size());
+
+		const auto lparen = token.find('(');
+		const auto rparen = token.rfind(')');
+		if (lparen == std::string_view::npos || rparen == std::string_view::npos || rparen <= lparen) {
+			return false;
+		}
+
+		outKey = std::string(Trim(std::string(token.substr(0, lparen))));
+
+		const auto arg = Trim(std::string(token.substr(lparen + 1, rparen - lparen - 1)));
+		if (!TryParseBool(arg, outVisible)) {
+			return false;
+		}
+
+		return !outKey.empty();
+	}
+
+	static bool ParseCommandLine(
+		const Config& cfg,
+		std::string_view line,
+		TargetKind defaultTarget,
+		Command& outCmd)
+	{
+		// Expected:
+		//   <timeSeconds> <Token>
+		// Example:
+		//   2.0 FBScale_Head(0.25)
+		//   5.0 2_FBVis_LThigh(false)
+
+		std::string s = Trim(std::string(line));
+		if (s.empty() || s[0] == ';' || s[0] == '#') {
+			return false;
+		}
+
+		std::istringstream iss(s);
+		float timeSec = 0.0f;
+		if (!(iss >> timeSec)) {
+			if (cfg.dbg.strictIni) {
+				spdlog::warn("[FB] Bad timeline line (no time): {}", s);
+			}
+			return false;
+		}
+
+		std::string token;
+		if (!(iss >> token)) {
+			if (cfg.dbg.strictIni) {
+				spdlog::warn("[FB] Bad timeline line (no token): {}", s);
+			}
+			return false;
+		}
+
+		TargetKind effectiveTarget = defaultTarget;
+
+		// Flexible rule:
+		// - If token starts with 2_, force Target regardless of section.
+		// - If token starts with 1_, force Caster (reserved/optional).
+		if (token.rfind("2_", 0) == 0) {
+			effectiveTarget = TargetKind::kTarget;
+			token.erase(0, 2);
+		} else if (token.rfind("1_", 0) == 0) {
+			effectiveTarget = TargetKind::kCaster;
+			token.erase(0, 2);
+		}
+
+		Command cmd{};
+		cmd.timeSeconds = std::max(0.0f, timeSec);
+		cmd.target = effectiveTarget;
+
+		// Scale
+		{
+			std::string key;
+			float scale = 1.0f;
+			if (TryParseScaleToken(token, key, scale)) {
+				cmd.type = CommandType::kScale;
+				cmd.key = std::move(key);
+				cmd.scale = scale;
+				outCmd = std::move(cmd);
+				return true;
+			}
+		}
+
+		// Vis
+		{
+			std::string key;
+			bool visible = true;
+			if (TryParseVisToken(token, key, visible)) {
+				cmd.type = CommandType::kVis;
+				cmd.key = std::move(key);
+				cmd.visible = visible;
+				outCmd = std::move(cmd);
+				return true;
+			}
+		}
+
+		if (cfg.dbg.strictIni) {
+			spdlog::warn("[FB] Unsupported token: {}", token);
+		}
+
+		return false;
+	}
+
+	// --------------------------
+	// Runtime per-caster state
+	// --------------------------
+
+	struct PerCasterState
 	{
 		std::uint64_t token{ 0 };
-		RE::ActorHandle lastTarget{};
-		std::chrono::steady_clock::time_point lastStart{};
+		RE::ActorHandle lastTarget;
 
-		std::unordered_set<std::string_view> casterTouched;
-		std::unordered_set<std::string_view> targetTouched;
-
-		std::unordered_set<std::string> casterVisTouched;
-		std::unordered_set<std::string> targetVisTouched;
+		std::unordered_set<std::string> casterScaleKeys;
+		std::unordered_set<std::string> targetScaleKeys;
+		std::unordered_set<std::string> casterVisKeys;
+		std::unordered_set<std::string> targetVisKeys;
 	};
 
-	std::mutex g_stateMutex;
-	std::unordered_map<std::uint32_t, ActorState> g_actorState;  // caster FormID -> state
+	static std::mutex g_stateLock;
+	static std::unordered_map<std::uint32_t, PerCasterState> g_state;
 
-	static std::uint64_t BumpTokenForCaster(RE::Actor* caster)
+	static std::uint64_t GetToken(std::uint32_t casterFormID)
 	{
-		const auto formID = caster->GetFormID();
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[formID];
+		std::lock_guard lk(g_stateLock);
+		auto it = g_state.find(casterFormID);
+		return (it == g_state.end()) ? 0 : it->second.token;
+	}
+
+	static std::uint64_t BumpTokenAndClear(std::uint32_t casterFormID)
+	{
+		std::lock_guard lk(g_stateLock);
+		auto& st = g_state[casterFormID];
 		++st.token;
-		st.casterTouched.clear();
-		st.targetTouched.clear();
-		st.casterVisTouched.clear();
-		st.targetVisTouched.clear();
+
+		st.casterScaleKeys.clear();
+		st.targetScaleKeys.clear();
+		st.casterVisKeys.clear();
+		st.targetVisKeys.clear();
+
 		return st.token;
 	}
 
-	static void SetLastTarget(std::uint32_t casterFormID, RE::ActorHandle targetHandle)
+	struct ResetSnapshot
 	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[casterFormID];
-		st.lastTarget = targetHandle;
-		st.lastStart = std::chrono::steady_clock::now();
+		RE::ActorHandle lastTarget;
+
+		std::vector<std::string> casterScaleKeys;
+		std::vector<std::string> targetScaleKeys;
+		std::vector<std::string> casterVisKeys;
+		std::vector<std::string> targetVisKeys;
+	};
+
+	static ResetSnapshot ConsumeTouchedAndBump(std::uint32_t casterFormID)
+	{
+		std::lock_guard lk(g_stateLock);
+		auto& st = g_state[casterFormID];
+
+		ResetSnapshot snap;
+		snap.lastTarget = st.lastTarget;
+
+		snap.casterScaleKeys.assign(st.casterScaleKeys.begin(), st.casterScaleKeys.end());
+		snap.targetScaleKeys.assign(st.targetScaleKeys.begin(), st.targetScaleKeys.end());
+		snap.casterVisKeys.assign(st.casterVisKeys.begin(), st.casterVisKeys.end());
+		snap.targetVisKeys.assign(st.targetVisKeys.begin(), st.targetVisKeys.end());
+
+		++st.token;
+		st.casterScaleKeys.clear();
+		st.targetScaleKeys.clear();
+		st.casterVisKeys.clear();
+		st.targetVisKeys.clear();
+
+		return snap;
+	}
+
+	static void SetLastTarget(std::uint32_t casterFormID, RE::ActorHandle target)
+	{
+		std::lock_guard lk(g_stateLock);
+		g_state[casterFormID].lastTarget = target;
 	}
 
 	static RE::ActorHandle GetLastTarget(std::uint32_t casterFormID)
 	{
-		std::lock_guard _{ g_stateMutex };
-		auto it = g_actorState.find(casterFormID);
-		if (it == g_actorState.end()) {
-			return {};
-		}
-		return it->second.lastTarget;
+		std::lock_guard lk(g_stateLock);
+		auto it = g_state.find(casterFormID);
+		return (it == g_state.end()) ? RE::ActorHandle{} : it->second.lastTarget;
 	}
 
-	static std::uint64_t GetToken(std::uint32_t casterFormID)
+	static void MarkTouched(std::uint32_t casterFormID, TargetKind who, const Command& cmd)
 	{
-		std::lock_guard _{ g_stateMutex };
-		auto it = g_actorState.find(casterFormID);
-		return (it == g_actorState.end()) ? 0 : it->second.token;
-	}
+		std::lock_guard lk(g_stateLock);
+		auto& st = g_state[casterFormID];
 
-	static bool ShouldDebounceStart(std::uint32_t casterFormID)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[casterFormID];
-
-		const auto now = std::chrono::steady_clock::now();
-		if (st.lastStart.time_since_epoch().count() != 0) {
-			const float dt = std::chrono::duration<float>(now - st.lastStart).count();
-			if (dt < kStartDebounceSeconds) {
-				return true;
+		if (cmd.type == CommandType::kScale) {
+			if (who == TargetKind::kCaster) {
+				st.casterScaleKeys.insert(cmd.key);
+			} else {
+				st.targetScaleKeys.insert(cmd.key);
+			}
+		} else if (cmd.type == CommandType::kVis) {
+			if (who == TargetKind::kCaster) {
+				st.casterVisKeys.insert(cmd.key);
+			} else {
+				st.targetVisKeys.insert(cmd.key);
 			}
 		}
-		st.lastStart = now;
-		return false;
 	}
 
-	static void MarkTouched(std::uint32_t casterFormID, TargetKind who, std::string_view nodeName)
+	// --------------------------
+	// Target resolution (distance)
+	// --------------------------
+
+	template <class T, class = void>
+	struct has_get : std::false_type {};
+	template <class T>
+	struct has_get<T, std::void_t<decltype(std::declval<T>().get())>> : std::true_type {};
+	template <class T>
+	constexpr bool has_get_v = has_get<T>::value;
+
+	template <class T>
+	RE::TESObjectREFR* UnwrapRefr(const T& v)
 	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[casterFormID];
-		if (who == TargetKind::kCaster) {
-			st.casterTouched.insert(nodeName);
-		}
-		else {
-			st.targetTouched.insert(nodeName);
+		if constexpr (std::is_pointer_v<T>) {
+			return v;
+		} else if constexpr (has_get_v<T>) {
+			return UnwrapRefr(v.get());
+		} else {
+			return nullptr;
 		}
 	}
 
-	static std::vector<std::string_view> GetTouched(std::uint32_t casterFormID, TargetKind who)
+	static RE::Actor* UnwrapActor(const auto& v)
 	{
-		std::lock_guard _{ g_stateMutex };
-		std::vector<std::string_view> out;
-		auto it = g_actorState.find(casterFormID);
-		if (it == g_actorState.end()) {
-			return out;
-		}
-		const auto& set = (who == TargetKind::kCaster) ? it->second.casterTouched : it->second.targetTouched;
-		out.reserve(set.size());
-		for (auto v : set) {
-			out.push_back(v);
-		}
-		return out;
+		auto* refr = UnwrapRefr(v);
+		return refr ? refr->As<RE::Actor>() : nullptr;
 	}
 
-	static void MarkVisTouched(std::uint32_t casterFormID, TargetKind who, const std::string& key)
+	static float DistSqr(const RE::NiPoint3& a, const RE::NiPoint3& b)
 	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[casterFormID];
-		if (who == TargetKind::kCaster) {
-			st.casterVisTouched.insert(key);
-		}
-		else {
-			st.targetVisTouched.insert(key);
-		}
+		const float dx = a.x - b.x;
+		const float dy = a.y - b.y;
+		const float dz = a.z - b.z;
+		return dx * dx + dy * dy + dz * dz;
 	}
 
-	static std::vector<std::string> GetVisTouched(std::uint32_t casterFormID, TargetKind who)
-	{
-		std::lock_guard _{ g_stateMutex };
-		std::vector<std::string> out;
-		auto it = g_actorState.find(casterFormID);
-		if (it == g_actorState.end()) {
-			return out;
-		}
-		const auto& set = (who == TargetKind::kCaster) ? it->second.casterVisTouched : it->second.targetVisTouched;
-		out.reserve(set.size());
-		for (const auto& v : set) {
-			out.push_back(v);
-		}
-		return out;
-	}
-
-	// =========================
-	// Target resolution (nearest actor)
-	// =========================
-	static RE::ActorHandle FindLikelyPairedTarget(RE::Actor* caster, bool log)
+	static RE::ActorHandle FindLikelyPairedTargetByDistance(const RE::Actor* caster, float maxDist, bool logOps)
 	{
 		if (!caster) {
 			return {};
 		}
 
-		auto casterPos = caster->GetPosition();
+		const float maxDistSqr = maxDist * maxDist;
+		const auto casterPos = caster->GetPosition();
 
 		RE::Actor* best = nullptr;
-		float bestDist2 = kTargetSearchRadius * kTargetSearchRadius;
+		float bestDistSqr = maxDistSqr;
 
-		auto* processLists = RE::ProcessLists::GetSingleton();
-		if (!processLists) {
+		// Only high process actors are a good start.
+		auto* lists = RE::ProcessLists::GetSingleton();
+		if (!lists) {
 			return {};
 		}
 
-		const auto visit = [&](RE::Actor* a) {
+		for (auto& h : lists->highActorHandles) {
+			auto* a = UnwrapActor(h);
 			if (!a || a == caster) {
-				return;
+				continue;
 			}
 			if (a->IsDead()) {
-				return;
+				continue;
+			}
+			// Paired target should almost always be loaded.
+			if (!a->Is3DLoaded()) {
+				continue;
 			}
 
-			auto p = a->GetPosition();
-			const float dx = p.x - casterPos.x;
-			const float dy = p.y - casterPos.y;
-			const float dz = p.z - casterPos.z;
-			const float d2 = dx * dx + dy * dy + dz * dz;
-
-			if (d2 < bestDist2) {
-				bestDist2 = d2;
+			const float d2 = DistSqr(casterPos, a->GetPosition());
+			if (d2 < bestDistSqr) {
+				bestDistSqr = d2;
 				best = a;
 			}
-			};
-
-		// Helper: resolve "handle-like" things to Actor*
-		const auto resolveActor = [](const auto& handleLike) -> RE::Actor* {
-			// CommonLib variants differ. Some handles do:
-			//   - handleLike.get() -> RE::Actor*
-			//   - handleLike.get() -> RE::NiPointer<RE::Actor> or BSTSmartPointer, then .get()
-			if constexpr (requires { handleLike.get().get(); }) {
-				return handleLike.get().get();
-			}
-			else if constexpr (requires { handleLike.get(); }) {
-				return handleLike.get();
-			}
-			else {
-				return nullptr;
-			}
-			};
-
-		// High actors (handle containers)
-		for (const auto& h : processLists->highActorHandles) {
-			if (auto* actor = resolveActor(h)) {
-				visit(actor);
-			}
 		}
 
-		// Middle-high actors (handle containers)
-		for (const auto& h : processLists->middleHighActorHandles) {
-			if (auto* actor = resolveActor(h)) {
-				visit(actor);
-			}
+		if (!best) {
+			return {};
 		}
 
-		if (best && log) {
+		if (logOps) {
 			spdlog::info("[FB] TargetResolve: caster='{}' -> target='{}' dist={}",
 				caster->GetName(),
 				best->GetName(),
-				std::sqrt(bestDist2));
+				std::sqrt(bestDistSqr));
 		}
 
-		return best ? best->CreateRefHandle() : RE::ActorHandle{};
+		return best->CreateRefHandle();
 	}
 
+	// --------------------------
+	// Timeline execution
+	// --------------------------
 
-	// =========================
-	// FBVis application helper
-	// =========================
-	static void ApplyVisByKey(const Config& cfg, RE::ActorHandle actor, const std::string& key, bool visible, bool logOps)
-	{
-		const auto it = cfg.visGroups.find(key);
-		if (it == cfg.visGroups.end() || it->second.empty()) {
-			// Treat key as literal object name
-			FB::Vis::SetObjectVisibleExact(actor, key, visible, logOps);
-			return;
-		}
-
-		// Treat key as group
-		for (const auto& objName : it->second) {
-			FB::Vis::SetObjectVisibleExact(actor, objName, visible, logOps);
-		}
-	}
-
-	// =========================
-	// Timeline start + schedule
-	// =========================
-	static void StartTimelineForCaster(const RE::Actor* caster, std::string_view eventTag)
+	static void CancelAndReset(RE::Actor* caster)
 	{
 		if (!caster) {
 			return;
@@ -971,8 +501,60 @@ namespace
 			return;
 		}
 
-		// eventTag is e.g. "FBEvent"
-		const auto it = cfg.eventToTimeline.find(std::string(eventTag));
+		const auto casterFormID = caster->GetFormID();
+		const auto casterHandle = caster->CreateRefHandle();
+
+		// Consume touched keys and bump token (cancels any pending commands).
+		const auto snap = ConsumeTouchedAndBump(casterFormID);
+		const auto targetHandle = snap.lastTarget;
+
+		RouterContext ctx{ casterHandle, targetHandle, cfg.dbg.logOps };
+
+		// Run resets on the game thread.
+		if (auto* taskIF = SKSE::GetTaskInterface(); taskIF) {
+			taskIF->AddTask([ctx, snap, logOps = cfg.dbg.logOps]() mutable {
+				for (const auto& k : snap.casterScaleKeys) {
+					FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kScale, TargetKind::kCaster, 0.0f, k, 1.0f, true });
+				}
+				for (const auto& k : snap.targetScaleKeys) {
+					FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kScale, TargetKind::kTarget, 0.0f, k, 1.0f, true });
+				}
+				for (const auto& k : snap.casterVisKeys) {
+					FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kVis, TargetKind::kCaster, 0.0f, k, 1.0f, true });
+				}
+				for (const auto& k : snap.targetVisKeys) {
+					FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kVis, TargetKind::kTarget, 0.0f, k, 1.0f, true });
+				}
+				(void)logOps;
+			});
+		} else {
+			for (const auto& k : snap.casterScaleKeys) {
+				FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kScale, TargetKind::kCaster, 0.0f, k, 1.0f, true });
+			}
+			for (const auto& k : snap.targetScaleKeys) {
+				FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kScale, TargetKind::kTarget, 0.0f, k, 1.0f, true });
+			}
+			for (const auto& k : snap.casterVisKeys) {
+				FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kVis, TargetKind::kCaster, 0.0f, k, 1.0f, true });
+			}
+			for (const auto& k : snap.targetVisKeys) {
+				FB::CommandRouter::ExecuteCommandNow(ctx, Command{ CommandType::kVis, TargetKind::kTarget, 0.0f, k, 1.0f, true });
+			}
+		}
+	}
+
+	static void StartTimelineForCaster(RE::Actor* caster, const std::string& eventTag)
+	{
+		if (!caster) {
+			return;
+		}
+
+		const auto cfg = GetConfigCopy();
+		if (!cfg.enableTimelines) {
+			return;
+		}
+
+		const auto it = cfg.eventToTimeline.find(eventTag);
 		if (it == cfg.eventToTimeline.end()) {
 			return;
 		}
@@ -980,202 +562,255 @@ namespace
 		const auto tlIt = cfg.timelines.find(it->second);
 		if (tlIt == cfg.timelines.end()) {
 			if (cfg.dbg.strictIni) {
-				spdlog::warn("[FB] Timeline '{}' not found for event '{}'", it->second, std::string(eventTag));
+				spdlog::warn("[FB] Timeline '{}' not found for event '{}'", it->second, eventTag);
 			}
 			return;
 		}
 
 		const auto& commands = tlIt->second;
-		const std::uint32_t casterFormID = caster->GetFormID();
+		const auto casterFormID = caster->GetFormID();
+		const auto casterHandle = caster->CreateRefHandle();
 
-		// capture target at the moment the start event fires (if you’re doing that)
-		RE::ActorHandle resolvedTarget = {};
-		// resolvedTarget = FindLikelyPairedTarget(const_cast<RE::Actor*>(caster), cfg.dbg.logOps); // if needed
+		// Resolve target ONLY if we have any target commands.
+		RE::ActorHandle targetHandle{};
+		bool needsTarget = false;
+		for (const auto& cmd : commands) {
+			if (cmd.target == TargetKind::kTarget) {
+				needsTarget = true;
+				break;
+			}
+		}
 
-		// Store target for later resets
-		SetLastTarget(casterFormID, resolvedTarget);
+		if (needsTarget) {
+			targetHandle = FindLikelyPairedTargetByDistance(caster, cfg.targetResolveMaxDist, cfg.dbg.logOps);
+			SetLastTarget(casterFormID, targetHandle);
+		} else {
+			// keep previous target if any
+			targetHandle = GetLastTarget(casterFormID);
+		}
 
-		// Token for canceling outstanding scheduled ops
-		const auto token = BumpTokenForCaster(const_cast<RE::Actor*>(caster));
-
-		// We only need non-const here to create handle
-		auto casterHandle = const_cast<RE::Actor*>(caster)->CreateRefHandle();
-		const auto targetHandle = GetLastTarget(casterFormID);
-		const bool logOps = cfg.dbg.logOps;
+		// Cancel any prior running timeline and clear touched (we'll re-mark below).
+		const auto token = BumpTokenAndClear(casterFormID);
 
 		// Mark touched now so reset is deterministic even if canceled mid-way.
 		for (const auto& cmd : commands) {
-			if (cmd.type == CommandType::kScale) {
-				MarkTouched(casterFormID, cmd.target, cmd.nodeName);
-			}
-			else if (cmd.type == CommandType::kVis) {
-				MarkVisTouched(casterFormID, cmd.target, cmd.visKey);
-			}
+			MarkTouched(casterFormID, cmd.target, cmd);
 		}
 
-		for (const auto& cmd : commands) {
-			std::thread([cfg, casterHandle, targetHandle, casterFormID, token, cmd, logOps]() mutable {
-				std::this_thread::sleep_for(std::chrono::duration<float>(cmd.timeSeconds));
-
-				if (GetToken(casterFormID) != token) {
-					return;
-				}
-
-				switch (cmd.type) {
-				case CommandType::kScale:
-					if (cmd.target == TargetKind::kCaster) {
-						FB::Scaler::SetNodeScale(casterHandle, cmd.nodeName, cmd.scale, logOps);
-					}
-					else {
-						FB::Scaler::SetNodeScale(targetHandle, cmd.nodeName, cmd.scale, logOps);
-					}
-					break;
-
-				case CommandType::kVis:
-					if (cmd.target == TargetKind::kCaster) {
-						ApplyVisByKey(cfg, casterHandle, cmd.visKey, cmd.visible, logOps);
-					}
-					else {
-						ApplyVisByKey(cfg, targetHandle, cmd.visKey, cmd.visible, logOps);
-					}
-					break;
-
-				default:
-					break;
-				}
-				}).detach();
-		}
+		RouterContext ctx{ casterHandle, targetHandle, cfg.dbg.logOps };
+		FB::CommandRouter::ScheduleCommands(ctx, commands, casterFormID, token, &GetToken);
 	}
 
+	// --------------------------
+	// INI parsing
+	// --------------------------
 
-	static void CancelAndReset(const RE::Actor* caster)
+	static std::vector<std::string> SplitCSV(const std::string& s)
 	{
-		if (!caster) {
+		std::vector<std::string> out;
+		std::string cur;
+		std::istringstream iss(s);
+		while (std::getline(iss, cur, ',')) {
+			cur = Trim(std::move(cur));
+			if (!cur.empty()) {
+				out.push_back(std::move(cur));
+			}
+		}
+		return out;
+	}
+
+	static void LoadConfigLocked()
+	{
+		Config newCfg{};
+		const auto path = GetConfigPath();
+
+		std::ifstream in(path);
+		if (!in.good()) {
+			spdlog::warn("[FB] Failed to open config: {}", path);
 			return;
 		}
 
-		const auto cfg = GetConfigCopy();
-		const std::uint32_t casterFormID = caster->GetFormID();
+		std::string currentSection;
+		std::string currentTimelineName;
+		TargetKind currentDefaultTarget = TargetKind::kCaster;
 
-		// BumpTokenForCaster expects non-const (because we mutate per-actor state),
-		// but we are not actually mutating the Actor itself.
-		(void)BumpTokenForCaster(const_cast<RE::Actor*>(caster));  // cancels outstanding commands
+		std::string line;
+		while (std::getline(in, line)) {
+			line = Trim(std::move(line));
+			if (line.empty() || line[0] == ';' || line[0] == '#') {
+				continue;
+			}
 
-		auto casterHandle = const_cast<RE::Actor*>(caster)->CreateRefHandle();
-		const auto targetHandle = GetLastTarget(casterFormID);
+			// Section header
+			if (line.size() >= 2 && line.front() == '[' && line.back() == ']') {
+				currentSection = line.substr(1, line.size() - 2);
+				currentTimelineName.clear();
 
-		// Reset only nodes we touched this run
-		for (auto node : GetTouched(casterFormID, TargetKind::kCaster)) {
-			SKSE::GetTaskInterface()->AddTask([=]() {
-				FB::Scaler::SetNodeScale(casterHandle, cmd.nodeName, cmd.scale, logOps);
-				});
+				TargetKind who{};
+				std::string tl;
+				if (ParseFBSection(currentSection, tl, who)) {
+					currentTimelineName = std::move(tl);
+					currentDefaultTarget = who;
+				}
+				continue;
+			}
 
-		
-		for (auto node : GetTouched(casterFormID, TargetKind::kTarget)) {
-			SKSE::GetTaskInterface()->AddTask([=]() {
-				FB::Scaler::SetNodeScale(casterHandle, cmd.nodeName, cmd.scale, logOps);
-				});
+			// Key=Value lines
+			const auto eq = line.find('=');
+			if (eq != std::string::npos) {
+				const auto key = Trim(line.substr(0, eq));
+				const auto val = Trim(line.substr(eq + 1));
 
-		
+				// [General]
+				if (IEquals(currentSection, "General")) {
+					if (IEquals(key, "enableTimelines")) {
+						TryParseBool(val, newCfg.enableTimelines);
+					} else if (IEquals(key, "resetOnPairEnd")) {
+						TryParseBool(val, newCfg.resetOnPairEnd);
+					} else if (IEquals(key, "resetOnPairedStop")) {
+						TryParseBool(val, newCfg.resetOnPairedStop);
+					} else if (IEquals(key, "logOps")) {
+						TryParseBool(val, newCfg.dbg.logOps);
+					} else if (IEquals(key, "strictIni")) {
+						TryParseBool(val, newCfg.dbg.strictIni);
+					} else if (IEquals(key, "targetResolveMaxDist")) {
+						try { newCfg.targetResolveMaxDist = std::stof(val); } catch (...) {}
+					}
+					continue;
+				}
 
-		// Reset vis toggles
-		for (auto key : GetVisTouched(casterFormID, TargetKind::kCaster)) {
-			ApplyVisByKey(cfg, casterHandle, key, true, cfg.dbg.logOps);
+				// [EventMap]
+				if (IEquals(currentSection, "EventMap")) {
+					if (!key.empty() && !val.empty()) {
+						newCfg.eventToTimeline[key] = val;
+					}
+					continue;
+				}
+
+				// [VisGroups] or [FBVisGroups]
+				if (IEquals(currentSection, "VisGroups") || IEquals(currentSection, "FBVisGroups")) {
+					if (!key.empty() && !val.empty()) {
+						newCfg.visGroups[key] = SplitCSV(val);
+					}
+					continue;
+				}
+			}
+
+			// Timeline command lines in [FB:...|...]
+			if (!currentTimelineName.empty()) {
+				Command cmd{};
+				if (ParseCommandLine(newCfg, line, currentDefaultTarget, cmd)) {
+					newCfg.timelines[currentTimelineName].push_back(std::move(cmd));
+				}
+			}
 		}
-		for (auto key : GetVisTouched(casterFormID, TargetKind::kTarget)) {
-			ApplyVisByKey(cfg, targetHandle, key, true, cfg.dbg.logOps);
+
+		// Publish config + vis groups
+		{
+			std::unique_lock lk(g_cfgLock);
+			g_cfg = std::move(newCfg);
 		}
+
+		// Vis keeps its own group map so runtime doesn't have to pass cfg around.
+		FB::Vis::SetGroups(GetConfigCopy().visGroups);
+
+		const auto published = GetConfigCopy();
+		spdlog::info("[FB] Config loaded: enableTimelines={} resetOnPairEnd={} resetOnPairedStop={} eventMaps={} timelines={} visGroups={}",
+			published.enableTimelines,
+			published.resetOnPairEnd,
+			published.resetOnPairedStop,
+			published.eventToTimeline.size(),
+			published.timelines.size(),
+			published.visGroups.size());
 	}
 
-
-	// =========================
+	// --------------------------
 	// Event sink
-	// =========================
+	// --------------------------
+
 	class AnimationEventSink : public RE::BSTEventSink<RE::BSAnimationGraphEvent>
 	{
 	public:
-		RE::BSEventNotifyControl ProcessEvent(const RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>*)
-			override
+		RE::BSEventNotifyControl ProcessEvent(
+			const RE::BSAnimationGraphEvent* a_event,
+			RE::BSTEventSource<RE::BSAnimationGraphEvent>*)
 		{
 			if (!a_event) {
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
-			auto* caster = a_event->holder ? a_event->holder->As<RE::Actor>() : nullptr;
-			if (!caster) {
+			auto* holderRefr = UnwrapRefr(a_event->holder);
+			if (!holderRefr) {
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
-			const auto& cfg = GetConfig();
-			const std::string tag = a_event->tag.c_str();
-
-			if (cfg.dbg.logEventTags) {
-				spdlog::info("[FB] AnimTag: actor='{}' tag='{}'", caster->GetName(), tag);
-			}
-
-			if (cfg.resetOnPairEnd && IEquals(tag, "PairEnd")) {
-				CancelAndReset(caster);
-				return RE::BSEventNotifyControl::kContinue;
-			}
-			if (cfg.resetOnPairedStop && IEquals(tag, "NPCpairedStop")) {
-				CancelAndReset(caster);
+			auto* actor = holderRefr->As<RE::Actor>();
+			if (!actor) {
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
-			// Start timelines based on EventToTimeline mapping
-			StartTimelineForCaster(caster, tag);
+			const std::string eventTag = a_event->tag.c_str();
+
+			// Start mapped timelines
+			StartTimelineForCaster(actor, eventTag);
+
+			// Resets
+			const auto cfg = GetConfigCopy();
+			if (cfg.resetOnPairEnd && eventTag == "PairEnd") {
+				CancelAndReset(actor);
+			}
+			if (cfg.resetOnPairedStop && eventTag == "NPCpairedStop") {
+				CancelAndReset(actor);
+			}
+
 			return RE::BSEventNotifyControl::kContinue;
 		}
 	};
 
-	AnimationEventSink g_animationEventSink;
-}  // namespace
+	static AnimationEventSink g_animationEventSink;
 
-// =========================
-// Public API
-// =========================
-void RegisterAnimationEventSink(RE::Actor* actor)
-{
-	if (!actor) {
-		return;
-	}
-
-	// CommonLibSSE-NG / AE builds often use the out-param form:
-	//   bool GetAnimationGraphManager(BSTSmartPointer<BSAnimationGraphManager>& out)
-	RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
-	if (!actor->GetAnimationGraphManager(manager) || !manager) {
-		spdlog::warn("RegisterAnimationEventSink: no animation graph manager");
-		return;
-	}
-
-	for (auto& graph : manager->graphs) {
-		if (!graph) {
-			continue;
+	void RegisterAnimationEventSink(RE::Actor* actor)
+	{
+		if (!actor) {
+			return;
 		}
-		graph->AddEventSink(&g_animationEventSink);
+
+		RE::BSTSmartPointer<RE::BShkbAnimationGraph> manager;
+		actor->GetAnimationGraphManager(manager);
+
+		if (!manager) {
+			spdlog::warn("RegisterAnimationEventSink: no animation graph manager");
+			return;
+		}
+
+		for (auto& graph : manager->graphs) {
+			if (!graph) {
+				continue;
+			}
+			graph->AddEventSink(&g_animationEventSink);
+		}
+
+		spdlog::info("Registered animation sinks to actor={}", actor->GetName());
+	}
+}
+
+// Public API
+namespace FB
+{
+	void ReloadConfig()
+	{
+		spdlog::info("[FB] Loading config: {}", GetConfigPath());
+
+		// (Re)load into globals.
+		LoadConfigLocked();
 	}
 
-	spdlog::info("Registered animation sinks to actor={}", actor->GetName());
-}
-
-
-void LoadFBConfig()
-{
-	std::lock_guard _{ g_cfgMutex };
-	LoadConfigLocked();
-}
-
-void LoadHeadScaleConfig()
-{
-	// Backward compatible wrapper
-	LoadFBConfig();
-}
-
-void HeadScale(RE::Actor* actor, float scale)
-{
-	if (!actor) {
-		return;
+	void RegisterAnimationEventSinkToPlayer()
+	{
+		auto* pc = RE::PlayerCharacter::GetSingleton();
+		if (!pc) {
+			return;
+		}
+		RegisterAnimationEventSink(pc);
 	}
-	const auto& cfg = GetConfig();
-	FB::Scaler::SetNodeScale(actor->CreateRefHandle(), FB::Scaler::kNodeHead, scale, cfg.dbg.logOps);
 }
