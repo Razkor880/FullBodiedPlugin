@@ -1,30 +1,46 @@
 // AnimationEvents.cpp
 //
-// Consolidated version (caster + target head scale timelines driven by INI)
+// FullBodiedPlugin – Head Scale Timeline Engine (caster + target)
 //
-// Behavior/Graph emits ONLY: FB_HeadScale  (start timeline immediately)
+// Behavior/Graph emits ONLY: FB_HeadScale
 //
-// INI layout (must look like this):
+// INI (preferred path): Data\FullBodiedPlugin.ini
+// INI (fallback path):  Data\SKSE\Plugins\FullBodiedPlugin.ini
+//
+// INI sections supported (as in your latest config):
+//   [General]
+//     bEnableHeadScaleTimelines = 1
+//     bResetOnPairEnd = 1
+//     bResetOnPairedStop = 1
+//
+//   [EventToTimeline]
+//     FB_HeadScale = DEFAULT
 //
 //   [CasterHeadScale]
-//   ; timeSeconds   HeadScaleS###
-//   0.000000 HeadScaleS100
-//   12.000000 HeadScaleS100
+//     0.000000 HeadScaleS100
 //
 //   [TargetHeadScale]
-//   ; timeSeconds   2_HeadScaleS###
-//   0.000000 2_HeadScaleS100
-//   5.000000 2_HeadScaleS025
-//   12.000000 2_HeadScaleS100
+//     5.000000 2_HeadScaleS025
 //
-// Target resolution: best-effort "nearest 3D-loaded actor in same cell within radius"
-// Reset reinforcement: cancels pending steps + resets both caster + remembered target on PairEnd
-// (also supports optional NPCPairedStop).
+//   [Debug]
+//     bLogHeadScale = 0
+//     bLogTargetResolve = 0
+//     bLogTimelineStart = 0
+//
+// Command format:
+//   HeadScaleS###   -> caster (event holder)
+//   2_HeadScaleS### -> target (paired partner heuristic)
+//
+// Reset reinforcement:
+//   Cancels pending scheduled steps + resets both caster and last-known target on:
+//     - PairEnd
+//     - NPCPairedStop (if enabled)
 //
 // Notes:
-// - Worker threads sleep; actual scene graph edits are queued via SKSE task interface.
-// - Per-caster token cancels old scheduled actions.
-// - Debounce prevents double-scheduling if FB_HeadScale fires twice rapidly (common with multiple graphs).
+// - Sleeps occur on detached worker threads.
+// - Actual scene graph writes occur on SKSE task thread (safe).
+// - Per-caster token cancels older schedules.
+// - Debounce avoids double-scheduling when start event fires twice quickly.
 
 #include "AnimationEvents.h"
 
@@ -57,7 +73,6 @@ namespace
 
 	// Reset reinforcement tags:
 	static constexpr std::string_view kPairEndEvent = "PairEnd";
-	// Many graphs use this for interruption; enable via INI if present in your setup.
 	static constexpr std::string_view kPairedStopEvent = "NPCPairedStop";
 
 	// Skeleton node name to scale
@@ -65,8 +80,8 @@ namespace
 	static constexpr float       kResetScale = 1.0f;
 
 	// Command prefixes (INI)
-	static constexpr std::string_view kCmdHeadScalePrefix = "HeadScaleS";        // caster
-	static constexpr std::string_view kCmdTargetPrefix = "2_";                  // target prefix
+	static constexpr std::string_view kCmdHeadScalePrefix = "HeadScaleS";          // caster
+	static constexpr std::string_view kCmdTargetPrefix = "2_";                    // target prefix
 	static constexpr std::string_view kCmdTargetHeadScalePrefix = "2_HeadScaleS"; // target
 
 	// Target search radius (paired idles are very close; tune as needed)
@@ -137,40 +152,6 @@ namespace
 			return false;
 		}
 		return fallback;
-	}
-
-	// =========================
-	// Scenegraph operation
-	// =========================
-	static void ApplyHeadScaleHandle(RE::ActorHandle handle, float scale)
-	{
-		// If handle is empty or actor unloaded, this becomes a no-op.
-		if (auto* task = SKSE::GetTaskInterface()) {
-			task->AddTask([handle, scale]() {
-				auto actorPtr = handle.get();
-				if (!actorPtr) {
-					return;
-				}
-				auto root = actorPtr->Get3D();
-				if (!root) {
-					return;
-				}
-
-				auto headNode = root->GetObjectByName(kHeadNodeName);
-				if (!headNode) {
-					spdlog::info("[FB] HeadScale: head node not found for '{}'", actorPtr->GetName());
-					return;
-				}
-
-				spdlog::info("[FB] HeadScale: actor='{}' node='{}' oldScale={} newScale={}",
-					actorPtr->GetName(),
-					headNode->name.c_str(),
-					headNode->local.scale,
-					scale);
-
-				headNode->local.scale = scale;
-				});
-		}
 	}
 
 	// =========================
@@ -253,11 +234,20 @@ namespace
 	// =========================
 	// Config
 	// =========================
+	struct DebugConfig
+	{
+		bool logHeadScale{ false };
+		bool logTargetResolve{ false };
+		bool logTimelineStart{ false };
+	};
+
 	struct Config
 	{
 		bool enableTimelines{ true };
 		bool resetOnPairEnd{ true };
-		bool resetOnPairedStop{ true };  // recommended
+		bool resetOnPairedStop{ true };
+
+		DebugConfig dbg{};
 
 		// StartEvent -> TimelineName
 		std::unordered_map<std::string, std::string> eventToTimeline;
@@ -270,8 +260,15 @@ namespace
 	Config     g_cfg;
 	bool       g_cfgLoaded = false;
 
-	static std::filesystem::path GetConfigPath()
+	static std::filesystem::path GetConfigPathPreferred()
 	{
+		// Mod root INI (preferred)
+		return std::filesystem::path("Data") / "FullBodiedPlugin.ini";
+	}
+
+	static std::filesystem::path GetConfigPathFallback()
+	{
+		// Traditional SKSE path (fallback)
 		return std::filesystem::path("Data") / "SKSE" / "Plugins" / "FullBodiedPlugin.ini";
 	}
 
@@ -290,15 +287,33 @@ namespace
 	{
 		Config newCfg;
 
-		const auto path = GetConfigPath();
+		// Defaults that match "current scope"
+		newCfg.eventToTimeline[std::string(kStartEvent)] = "DEFAULT";
+
+		// Open preferred path first
+		auto path = GetConfigPathPreferred();
 		std::ifstream in(path);
+
 		if (!in.good()) {
-			spdlog::warn("[FB] Config not found: {} (using defaults)", path.string());
-			newCfg.eventToTimeline[std::string(kStartEvent)] = "DEFAULT";
+			// Try fallback
+			auto fallback = GetConfigPathFallback();
+			in.open(fallback);
+			if (in.good()) {
+				path = fallback;
+				spdlog::info("[FB] Using fallback config path: {}", path.string());
+			}
+		}
+
+		if (!in.good()) {
+			spdlog::warn("[FB] Config not found: {} (and fallback missing: {}) - using defaults",
+				GetConfigPathPreferred().string(),
+				GetConfigPathFallback().string());
 			g_cfg = std::move(newCfg);
 			g_cfgLoaded = true;
 			return;
 		}
+
+		spdlog::info("[FB] Config path: {}", path.string());
 
 		std::string currentSection;
 		std::string line;
@@ -335,6 +350,29 @@ namespace
 				}
 				else if (IEquals(key, "bResetOnPairedStop")) {
 					newCfg.resetOnPairedStop = ParseBool(val, newCfg.resetOnPairedStop);
+				}
+				continue;
+			}
+
+			// [Debug]
+			if (IEquals(currentSection, "Debug")) {
+				auto eq = line.find('=');
+				if (eq == std::string::npos) {
+					continue;
+				}
+				std::string key = line.substr(0, eq);
+				std::string val = line.substr(eq + 1);
+				TrimInPlace(key);
+				TrimInPlace(val);
+
+				if (IEquals(key, "bLogHeadScale")) {
+					newCfg.dbg.logHeadScale = ParseBool(val, newCfg.dbg.logHeadScale);
+				}
+				else if (IEquals(key, "bLogTargetResolve")) {
+					newCfg.dbg.logTargetResolve = ParseBool(val, newCfg.dbg.logTargetResolve);
+				}
+				else if (IEquals(key, "bLogTimelineStart")) {
+					newCfg.dbg.logTimelineStart = ParseBool(val, newCfg.dbg.logTimelineStart);
 				}
 				continue;
 			}
@@ -385,6 +423,8 @@ namespace
 				}
 
 				if (auto cmd = ParseCommandLine(*t, cmdTok)) {
+					// For now all commands go into DEFAULT timeline.
+					// EventToTimeline supports future expansion without changing this INI layout.
 					newCfg.timelines["DEFAULT"].push_back(*cmd);
 				}
 				continue;
@@ -393,7 +433,7 @@ namespace
 			// Unknown sections ignored
 		}
 
-		// Defaults if not provided
+		// Ensure start event always has a mapping (DEFAULT by default)
 		if (newCfg.eventToTimeline.find(std::string(kStartEvent)) == newCfg.eventToTimeline.end()) {
 			newCfg.eventToTimeline[std::string(kStartEvent)] = "DEFAULT";
 		}
@@ -420,6 +460,46 @@ namespace
 			LoadConfigLocked();
 		}
 		return g_cfg;
+	}
+
+	// =========================
+	// Scenegraph operation (logging aware)
+	// =========================
+	static void ApplyHeadScaleHandle(RE::ActorHandle handle, float scale)
+	{
+		// If handle is empty or actor unloaded, this becomes a no-op.
+		if (auto* task = SKSE::GetTaskInterface()) {
+			task->AddTask([handle, scale]() {
+				auto actorPtr = handle.get();
+				if (!actorPtr) {
+					return;
+				}
+				auto root = actorPtr->Get3D();
+				if (!root) {
+					return;
+				}
+
+				auto headNode = root->GetObjectByName(kHeadNodeName);
+				if (!headNode) {
+					const auto& cfg = GetConfig();
+					if (cfg.dbg.logHeadScale) {
+						spdlog::info("[FB] HeadScale: head node not found for '{}'", actorPtr->GetName());
+					}
+					return;
+				}
+
+				const auto& cfg = GetConfig();
+				if (cfg.dbg.logHeadScale) {
+					spdlog::info("[FB] HeadScale: actor='{}' node='{}' oldScale={} newScale={}",
+						actorPtr->GetName(),
+						headNode->name.c_str(),
+						headNode->local.scale,
+						scale);
+				}
+
+				headNode->local.scale = scale;
+				});
+		}
 	}
 
 	// =========================
@@ -470,20 +550,25 @@ namespace
 			return RE::BSContainer::ForEachResult::kContinue;
 			});
 
+		const auto& cfg = GetConfig();
 		if (best) {
-			spdlog::info("[FB] TargetResolve: caster='{}' -> target='{}' dist={}",
-				caster->GetName(),
-				best->GetName(),
-				std::sqrt(bestDist2));
+			if (cfg.dbg.logTargetResolve) {
+				spdlog::info("[FB] TargetResolve: caster='{}' -> target='{}' dist={}",
+					caster->GetName(),
+					best->GetName(),
+					std::sqrt(bestDist2));
+			}
 			return best->CreateRefHandle();
 		}
 
-		spdlog::info("[FB] TargetResolve: caster='{}' -> no target found", caster->GetName());
+		if (cfg.dbg.logTargetResolve) {
+			spdlog::info("[FB] TargetResolve: caster='{}' -> no target found", caster->GetName());
+		}
 		return {};
 	}
 
 	// =========================
-	// Per-actor token + remembered target + debounce
+	// Per-caster token + remembered target + debounce
 	// =========================
 	struct ActorState
 	{
@@ -557,16 +642,21 @@ namespace
 			return;
 		}
 
+		// If your EventToTimeline mapping is used for future expansion, honor it now.
 		auto itMap = cfg.eventToTimeline.find(std::string(startEvent));
 		if (itMap == cfg.eventToTimeline.end()) {
-			spdlog::info("[FB] Timeline: no mapping for startEvent='{}'", std::string(startEvent));
+			if (cfg.dbg.logTimelineStart) {
+				spdlog::info("[FB] Timeline: no mapping for startEvent='{}'", std::string(startEvent));
+			}
 			return;
 		}
 
 		const std::string& timelineName = itMap->second;
 		auto itTl = cfg.timelines.find(timelineName);
 		if (itTl == cfg.timelines.end() || itTl->second.empty()) {
-			spdlog::info("[FB] Timeline: timeline '{}' has no commands", timelineName);
+			if (cfg.dbg.logTimelineStart) {
+				spdlog::info("[FB] Timeline: timeline '{}' has no commands", timelineName);
+			}
 			return;
 		}
 
@@ -574,7 +664,9 @@ namespace
 
 		// Debounce duplicate starts (common if event fires on multiple graphs)
 		if (ShouldDebounceStart(casterFormID)) {
-			spdlog::info("[FB] Timeline: debounced duplicate start for actor='{}'", caster->GetName());
+			if (cfg.dbg.logTimelineStart) {
+				spdlog::info("[FB] Timeline: debounced duplicate start for actor='{}'", caster->GetName());
+			}
 			return;
 		}
 
@@ -589,12 +681,14 @@ namespace
 		// Copy commands to avoid lifetime issues
 		const auto commands = itTl->second;
 
-		spdlog::info("[FB] Timeline start: caster='{}' startEvent='{}' timeline='{}' cmds={} token={}",
-			caster->GetName(),
-			std::string(startEvent),
-			timelineName,
-			commands.size(),
-			token);
+		if (cfg.dbg.logTimelineStart) {
+			spdlog::info("[FB] Timeline start: caster='{}' startEvent='{}' timeline='{}' cmds={} token={}",
+				caster->GetName(),
+				std::string(startEvent),
+				timelineName,
+				commands.size(),
+				token);
+		}
 
 		for (const auto& cmd : commands) {
 			std::thread([casterHandle, targetHandle, casterFormID, token, cmd]() {
@@ -666,6 +760,7 @@ namespace
 			// Reset reinforcement on end/stop events
 			if ((cfg.resetOnPairEnd && tag == kPairEndEvent) ||
 				(cfg.resetOnPairedStop && tag == kPairedStopEvent)) {
+				// Always log resets at info (useful even with debug off)
 				spdlog::info("[FB] '{}' on '{}' -> cancel + reset caster/target head scale",
 					std::string(tag), caster->GetName());
 				CancelAndReset(caster);
@@ -712,7 +807,7 @@ void RegisterAnimationEventSink(RE::Actor* actor)
 
 void HeadScale(RE::Actor* actor, float scale)
 {
-	// Legacy compatibility
+	// Legacy compatibility (still useful as a utility)
 	if (actor) {
 		ApplyHeadScaleHandle(actor->CreateRefHandle(), scale);
 	}
