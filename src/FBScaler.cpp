@@ -4,6 +4,7 @@
 #include <cctype>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "RE/Skyrim.h"
@@ -19,6 +20,54 @@ namespace
 
 	template <class T>
 	constexpr bool has_get_v = has_get<T>::value;
+
+	// Helper: iterate a NiNode's children across CommonLib variants.
+	template <class NodeT, class Fn>
+	static void ForEachChild(NodeT* node, Fn&& fn)
+	{
+		if (!node) {
+			return;
+		}
+
+		if constexpr (requires(NodeT* n) { n->children; }) {
+			for (auto& child : node->children) {
+				if (!child) {
+					continue;
+				}
+				if constexpr (has_get_v<std::remove_reference_t<decltype(child)>>) {
+					fn(child.get());
+				} else {
+					fn(child);
+				}
+			}
+		} else if constexpr (requires(NodeT* n) { n->GetChildren(); }) {
+			auto& arr = node->GetChildren();
+			std::uint32_t count = 0;
+			if constexpr (requires { arr.size(); }) {
+				count = static_cast<std::uint32_t>(arr.size());
+			} else if constexpr (requires { arr.GetSize(); }) {
+				count = static_cast<std::uint32_t>(arr.GetSize());
+			} else if constexpr (requires { arr.Length(); }) {
+				count = static_cast<std::uint32_t>(arr.Length());
+			}
+
+			for (std::uint32_t i = 0; i < count; ++i) {
+				auto&& elem = arr[i];
+				RE::NiAVObject* child = nullptr;
+				if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(elem)>>) {
+					child = elem;
+				} else if constexpr (has_get_v<std::remove_reference_t<decltype(elem)>>) {
+					child = elem.get();
+				} else if constexpr (requires { elem.get(); }) {
+					child = elem.get();
+				}
+
+				if (child) {
+					fn(child);
+				}
+			}
+		}
+	}
 
 	template <class T>
 	RE::TESObjectREFR* UnwrapRefr(const T& v)
@@ -80,17 +129,12 @@ namespace
 			return;
 		}
 
-		out.emplace_back(obj->name.c_str());
+		out.emplace_back(obj->name.c_str() ? obj->name.c_str() : "");
 
 		if (auto* node = obj->AsNode(); node) {
-			for (auto& child : node->children) {
-				if (child) {
-					CollectAllNames(child.get(), out, limit);
-					if (out.size() >= limit) {
-						return;
-					}
-				}
-			}
+			ForEachChild(node, [&](RE::NiAVObject* child) {
+				CollectAllNames(child, out, limit);
+			});
 		}
 	}
 
@@ -100,18 +144,9 @@ namespace
 			return nullptr;
 		}
 
-		if (obj->name == name.c_str()) {
-			return obj;
-		}
-
-		if (auto* node = obj->AsNode(); node) {
-			for (auto& child : node->children) {
-				if (!child) {
-					continue;
-				}
-				if (auto* found = FindByExactName(child.get(), name)) {
-					return found;
-				}
+		if (!name.empty()) {
+			if (auto* found = obj->GetObjectByName(RE::BSFixedString(name.c_str())); found) {
+				return found;
 			}
 		}
 
@@ -130,13 +165,15 @@ namespace
 		}
 
 		if (auto* node = obj->AsNode(); node) {
-			for (auto& child : node->children) {
-				if (!child) {
-					continue;
+			RE::NiAVObject* result = nullptr;
+			ForEachChild(node, [&](RE::NiAVObject* child) {
+				if (result) {
+					return;
 				}
-				if (auto* found = FindFirstNameContaining(child.get(), needle)) {
-					return found;
-				}
+				result = FindFirstNameContaining(child, needle);
+			});
+			if (result) {
+				return result;
 			}
 		}
 
@@ -305,7 +342,8 @@ namespace FB::Scaler
 		obj->local.scale = scale;
 
 		// Ensure world data updates quickly.
-		obj->Update(0.0f);
+		obj->UpdateWorldData(nullptr);
+		obj->UpdateWorldBound();
 
 		if (logOps) {
 			spdlog::info("[FB] NodeScale: actor='{}' node='{}' oldScale={} newScale={}",
@@ -339,7 +377,8 @@ namespace FB::Scaler
 
 		const float oldScale = obj->local.scale;
 		obj->local.scale = scale;
-		obj->Update(0.0f);
+		obj->UpdateWorldData(nullptr);
+		obj->UpdateWorldBound();
 
 		if (logOps) {
 			spdlog::info("[FB] NodeScale: actor='{}' key='{}' node='{}' oldScale={} newScale={}",

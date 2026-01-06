@@ -769,15 +769,14 @@ namespace
 
 	static AnimationEventSink g_animationEventSink;
 
-	void RegisterAnimationEventSink(RE::Actor* actor)
+		void RegisterAnimationEventSinkImpl(RE::Actor* actor)
 	{
 		if (!actor) {
 			return;
 		}
 
-		RE::BSTSmartPointer<RE::BShkbAnimationGraph> manager;
+		RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
 		actor->GetAnimationGraphManager(manager);
-
 		if (!manager) {
 			spdlog::warn("RegisterAnimationEventSink: no animation graph manager");
 			return;
@@ -790,9 +789,17 @@ namespace
 			graph->AddEventSink(&g_animationEventSink);
 		}
 
-		spdlog::info("Registered animation sinks to actor={}", actor->GetName());
+			spdlog::info("Registered animation sinks to actor={}", actor->GetName());
 	}
 }
+
+	// If a header declares a global `RegisterAnimationEventSink(Actor*)`, implement it
+	// here as a wrapper to avoid ambiguous unqualified lookup when this TU also has
+	// internal helpers.
+	void RegisterAnimationEventSink(RE::Actor* actor)
+	{
+		RegisterAnimationEventSinkImpl(actor);
+	}
 
 // Public API
 namespace FB

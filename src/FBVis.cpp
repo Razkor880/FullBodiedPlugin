@@ -6,6 +6,7 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "RE/Skyrim.h"
@@ -24,6 +25,58 @@ namespace
 
 	template <class T>
 	constexpr bool has_get_v = has_get<T>::value;
+
+	// Helper: iterate a NiNode's children across CommonLib variants.
+	template <class NodeT, class Fn>
+	static void ForEachChild(NodeT* node, Fn&& fn)
+	{
+		if (!node) {
+			return;
+		}
+
+		// Some CommonLib builds expose a public `children` member,
+		// others expose a `GetChildren()` accessor.
+		if constexpr (requires(NodeT* n) { n->children; }) {
+			for (auto& elem : node->children) {
+				if constexpr (has_get_v<std::remove_reference_t<decltype(elem)>>) {
+					auto* child = elem.get();
+					if (child) {
+						fn(child);
+					}
+				} else {
+					auto* child = elem;
+					if (child) {
+						fn(child);
+					}
+				}
+			}
+		} else if constexpr (requires(NodeT* n) { n->GetChildren(); }) {
+			auto& arr = node->GetChildren();
+			std::uint32_t count = 0;
+			if constexpr (requires { arr.size(); }) {
+				count = static_cast<std::uint32_t>(arr.size());
+			} else if constexpr (requires { arr.GetSize(); }) {
+				count = static_cast<std::uint32_t>(arr.GetSize());
+			} else if constexpr (requires { arr.Length(); }) {
+				count = static_cast<std::uint32_t>(arr.Length());
+			}
+
+			for (std::uint32_t i = 0; i < count; ++i) {
+				auto&& elem = arr[i];
+				RE::NiAVObject* child = nullptr;
+				if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(elem)>>) {
+					child = elem;
+				} else if constexpr (has_get_v<std::remove_reference_t<decltype(elem)>>) {
+					child = elem.get();
+				} else if constexpr (requires { elem.get(); }) {
+					child = elem.get();
+				}
+				if (child) {
+					fn(child);
+				}
+			}
+		}
+	}
 
 	template <class T>
 	RE::TESObjectREFR* UnwrapRefr(const T& v)
@@ -77,17 +130,12 @@ namespace
 			return;
 		}
 
-		out.emplace_back(obj->name.c_str());
+		out.emplace_back(obj->name.c_str() ? obj->name.c_str() : "");
 
 		if (auto* node = obj->AsNode(); node) {
-			for (auto& child : node->children) {
-				if (child) {
-					CollectAllNames(child.get(), out, limit);
-					if (out.size() >= limit) {
-						return;
-					}
-				}
-			}
+			ForEachChild(node, [&](RE::NiAVObject* child) {
+				CollectAllNames(child, out, limit);
+			});
 		}
 	}
 
@@ -101,15 +149,10 @@ namespace
 			return obj;
 		}
 
-		if (auto* node = obj->AsNode(); node) {
-			for (auto& child : node->children) {
-				if (!child) {
-					continue;
-				}
-				if (auto* found = FindByExactName(child.get(), name)) {
-					return found;
-				}
-			}
+
+		// Prefer the engine's own recursive search.
+		if (auto* found = obj->GetObjectByName(RE::BSFixedString(name.c_str())); found) {
+			return found;
 		}
 
 		return nullptr;
@@ -165,7 +208,8 @@ namespace FB::Vis
 		// Cull/uncull the object.
 		// NOTE: AppCulled is the most common "hard hide" toggle in Skyrim.
 		obj->SetAppCulled(!visible);
-		obj->Update(0.0f);
+			obj->UpdateWorldData(nullptr);
+			obj->UpdateWorldBound();
 
 		if (logOps) {
 			spdlog::info("[FB] Vis: actor='{}' object='{}' visible={}", actor->GetName(), obj->name.c_str(), visible);
