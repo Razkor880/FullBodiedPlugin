@@ -10,13 +10,10 @@ Skyrim animations are weird. In short, we are manipulating a vanilla animation f
 0.000000 NPCKillMoveStart
 this says at 0 seconds into the animation, start the kill move.
 
-A mod called Payload Interpreter should in theory allow us to use these annotations to do whatever we want over the course of the animation via SKSE scripts, read more about that here:
-https://github.com/D7ry/PayloadInterpreter
-
 The goal here is to be able to use an annotation like this:
-3.000000 PIE.@SGVB|FB_HeadShrink|1
+3.000000 FB_HeadShrink
 
-To shrink the character's head at 3 seconds into the animation, by using the PIE event with FB_HeadShrink as a payload.
+To shrink the character's head at 3 seconds into the animation, by using the custom event FB_HeadShrink as a trigger.
 
 Once established, this pipeline will allow us to begin working on all of the various mesh/expression morphs and transforms that we would like to bake into our animation files. 
 
