@@ -7,8 +7,8 @@ void RegisterAnimationEventSink(RE::Actor* actor);
 // Loads/refreshes FullBodiedIni.ini (preferred) / fallback.
 void LoadFBConfig();
 
-// Backward-compatible wrapper (older code calls this).
+// Backward-compatible wrapper (older call sites may still call this).
 void LoadHeadScaleConfig();
 
-// Applies head scale immediately (used by other features / testing).
+// Immediate scale helper (debug/manual use)
 void HeadScale(RE::Actor* actor, float scale);

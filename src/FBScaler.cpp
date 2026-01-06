@@ -6,11 +6,6 @@
 #include <algorithm>
 #include <string>
 
-namespace
-{
-	static constexpr const char* kHeadNodeName = "NPC Head [Head]";
-}
-
 namespace FB::Scaler
 {
 	void SetNodeScale(RE::ActorHandle actor, std::string_view nodeName, float scale, bool logOps)
@@ -62,10 +57,5 @@ namespace FB::Scaler
 		for (auto n : nodeNames) {
 			SetNodeScale(actor, n, 1.0f, logOps);
 		}
-	}
-
-	void SetHeadScale(RE::ActorHandle actor, float scale, bool logOps)
-	{
-		SetNodeScale(actor, kHeadNodeName, scale, logOps);
 	}
 }

@@ -1,6 +1,6 @@
 // AnimationEvents.cpp
 //
-// FullBodiedPlugin – FB INI timeline parser (Head Scale only, for now)
+// FullBodiedPlugin – FB INI timeline parser (Scale system, expanding)
 //
 // INI file name: FullBodiedIni.ini
 // Preferred: Data\FullBodiedIni.ini
@@ -8,22 +8,27 @@
 //
 // Event mapping:
 //   [EventToTimeline]
+//   <StartEventTag> = <TimelineName>
+//
+// Example:
 //   FBEvent = paired_huga.hkx
 //
-// Timeline sections:
-//   [FB:paired_huga.hkx|Caster|Head|Scale]
-//   0.000000 FBHeadScale(1.0)
+// Timeline sections (2-part):
+//   [FB:paired_huga.hkx|Caster]
+//   0.000000 FBScale_Head(1.0)
 //
-//   [FB:paired_huga.hkx|Target|Head|Scale]
-//   0.000000 2_FBHeadScale(1.0)
+//   [FB:paired_huga.hkx|Target]
+//   0.000000 2_FBScale_Head(1.0)
+//
+// Token format (canonical):
+//   FBScale_<NodeKey>(<floatMultiplier>)
+//   2_FBScale_<NodeKey>(<floatMultiplier>)
+//
+// Future extension:
+//   FBVisible_<NodeKey>(true/false) etc (parser already structured for this)
 //
 // Reset reinforcement:
-//   PairEnd and NPCPairedStop cancel pending tasks and reset caster + target head scale.
-//
-// Canonical command token:
-//   FBHeadScale(<floatMultiplier>)
-// Target lines must use:
-//   2_FBHeadScale(<floatMultiplier>)
+//   PairEnd and NPCPairedStop cancel pending tasks and reset caster + target (all nodes touched).
 
 #include "AnimationEvents.h"
 #include "FBScaler.h"
@@ -44,6 +49,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -55,9 +61,6 @@ namespace
 	static constexpr std::string_view kPairEndEvent = "PairEnd";
 	static constexpr std::string_view kPairedStopEvent = "NPCPairedStop";
 
-	// Reset scale for head node
-	static constexpr float kResetScale = 1.0f;
-
 	// Target search radius (tune as needed; 200–300 tends to work for paired idles)
 	static constexpr float kTargetSearchRadius = 250.0f;
 
@@ -67,8 +70,11 @@ namespace
 	// Target line prefix standard
 	static constexpr std::string_view kTargetPrefix = "2_";
 
-	// Action token (brand + explicit)
-	static constexpr std::string_view kActionHeadScale = "FBHeadScale";
+	// Command namespace prefix
+	static constexpr std::string_view kFBPrefix = "FB";
+
+	// Current supported function:
+	static constexpr std::string_view kFuncScale = "FBScale";  // "FBScale_<Node>(x)"
 
 	// =========================
 	// Small string utils
@@ -84,8 +90,7 @@ namespace
 	{
 		auto p1 = s.find(';');
 		auto p2 = s.find('#');
-		auto p = std::min(p1 == std::string::npos ? s.size() : p1,
-			p2 == std::string::npos ? s.size() : p2);
+		auto p = std::min(p1 == std::string::npos ? s.size() : p1, p2 == std::string::npos ? s.size() : p2);
 		if (p != std::string::npos && p < s.size()) {
 			s.resize(p);
 		}
@@ -162,15 +167,21 @@ namespace
 
 	enum class CommandType
 	{
-		kHeadScale
+		kScale
+		// future: kVisible, kSound, kFace, kRM, etc.
 	};
 
 	struct Command
 	{
-		TargetKind  target{ TargetKind::kCaster };
-		CommandType type{ CommandType::kHeadScale };
-		float       timeSeconds{ 0.0f };
-		float       scale{ 1.0f };
+		TargetKind target{ TargetKind::kCaster };
+		CommandType type{ CommandType::kScale };
+		float timeSeconds{ 0.0f };
+
+		// nodeName points to FB::Scaler::kNode* constants (static lifetime).
+		std::string_view nodeName{};
+
+		// payload
+		float scale{ 1.0f };
 	};
 
 	struct DebugConfig
@@ -199,6 +210,9 @@ namespace
 	Config     g_cfg;
 	bool       g_cfgLoaded = false;
 
+	// =========================
+	// Config paths
+	// =========================
 	static std::filesystem::path GetConfigPathPreferred()
 	{
 		return std::filesystem::path("Data") / "FullBodiedIni.ini";
@@ -209,74 +223,118 @@ namespace
 		return std::filesystem::path("Data") / "SKSE" / "Plugins" / "FullBodiedIni.ini";
 	}
 
-	static void SortAndClamp(std::vector<Command>& cmds)
+	// =========================
+	// Node mapping
+	// =========================
+	// Map author-friendly NodeKeys to canonical skeleton node names.
+	// Keep keys stable; this is your “public API” for authors.
+	static std::optional<std::string_view> ResolveNodeKey(std::string_view key)
 	{
-		for (auto& c : cmds) {
-			if (c.timeSeconds < 0.0f) {
-				c.timeSeconds = 0.0f;
-			}
-			// allow >1.0 for comedic / experimental scaling, but clamp to a reasonable bound
-			c.scale = std::clamp(c.scale, 0.0f, 5.0f);
-		}
-		std::sort(cmds.begin(), cmds.end(),
-			[](const auto& a, const auto& b) { return a.timeSeconds < b.timeSeconds; });
+		// NOTE: keys are case-sensitive as written; you can relax later if you want.
+		// Head / Neck
+		if (key == "Head") return FB::Scaler::kNodeHead;
+		if (key == "Neck") return FB::Scaler::kNodeNeck;
+
+		// Spine
+		if (key == "Spine0") return FB::Scaler::kNodeSpine0;
+		if (key == "Spine1") return FB::Scaler::kNodeSpine1;
+		if (key == "Spine2") return FB::Scaler::kNodeSpine2;
+		if (key == "Spine3") return FB::Scaler::kNodeSpine3;
+
+		// Pelvis
+		if (key == "Pelvis") return FB::Scaler::kNodePelvis;
+
+		// Arms
+		if (key == "LClavicle") return FB::Scaler::kNodeLClavicle;
+		if (key == "RClavicle") return FB::Scaler::kNodeRClavicle;
+		if (key == "LUpperArm") return FB::Scaler::kNodeLUpperArm;
+		if (key == "RUpperArm") return FB::Scaler::kNodeRUpperArm;
+		if (key == "LForearm") return FB::Scaler::kNodeLForearm;
+		if (key == "RForearm") return FB::Scaler::kNodeRForearm;
+		if (key == "LHand") return FB::Scaler::kNodeLHand;
+		if (key == "RHand") return FB::Scaler::kNodeRHand;
+
+		// Legs
+		if (key == "LThigh") return FB::Scaler::kNodeLThigh;
+		if (key == "RThigh") return FB::Scaler::kNodeRThigh;
+		if (key == "LCalf") return FB::Scaler::kNodeLCalf;
+		if (key == "RCalf") return FB::Scaler::kNodeRCalf;
+		if (key == "LFoot") return FB::Scaler::kNodeLFoot;
+		if (key == "RFoot") return FB::Scaler::kNodeRFoot;
+		if (key == "LToe0") return FB::Scaler::kNodeLToe0;
+		if (key == "RToe0") return FB::Scaler::kNodeRToe0;
+
+		return std::nullopt;
 	}
 
-	// Parse FBHeadScale(<float>) where cmd is a single token, e.g. FBHeadScale(1.0)
-	static std::optional<float> TryParseFBHeadScaleCall(std::string_view cmd, bool strictIni)
+	// =========================
+	// Parsing tokens
+	// =========================
+	// Parses: FBScale_<NodeKey>(<float>)
+	// Returns: (nodeName, scale)
+	struct ParsedScale
 	{
-		// Must look like: FBHeadScale(<...>)
-		if (cmd.rfind(kActionHeadScale, 0) != 0) {
+		std::string_view nodeName{};
+		float scale{ 1.0f };
+	};
+
+	static std::optional<ParsedScale> TryParseScaleToken(std::string_view tok, bool strictIni)
+	{
+		// Must begin with "FBScale_"
+		const std::string_view prefix = "FBScale_";
+		if (tok.rfind(prefix, 0) != 0) {
 			return std::nullopt;
 		}
 
-		// at least "FBHeadScale()"
-		if (cmd.size() <= kActionHeadScale.size() + 2) {
+		// Find '(' and ')'
+		const size_t open = tok.find('(');
+		const size_t close = tok.rfind(')');
+		if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1 || close != tok.size() - 1) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: FBHeadScale missing parentheses/arg: '{}'", std::string(cmd));
+				spdlog::warn("[FB] INI: bad call syntax '{}'", std::string(tok));
 			}
 			return std::nullopt;
 		}
 
-		const size_t open = cmd.find('(');
-		const size_t close = cmd.rfind(')');
-		if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1) {
+		// NodeKey is between prefix and '(' and must include underscore format: FBScale_<NodeKey>(...)
+		if (open <= prefix.size()) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: FBHeadScale bad call syntax: '{}'", std::string(cmd));
+				spdlog::warn("[FB] INI: missing NodeKey in '{}'", std::string(tok));
 			}
 			return std::nullopt;
 		}
 
-		if (open != kActionHeadScale.size()) {
-			// e.g. "FBHeadScaleX(...)" should fail
-			return std::nullopt;
-		}
+		const std::string_view nodeKey = tok.substr(prefix.size(), open - prefix.size());
 
-		if (close != cmd.size() - 1) {
+		auto nodeName = ResolveNodeKey(nodeKey);
+		if (!nodeName) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: FBHeadScale trailing text not allowed: '{}'", std::string(cmd));
+				spdlog::warn("[FB] INI: unknown NodeKey '{}' in '{}'", std::string(nodeKey), std::string(tok));
 			}
 			return std::nullopt;
 		}
 
-		std::string arg{ cmd.substr(open + 1, close - open - 1) };
+		std::string arg{ tok.substr(open + 1, close - open - 1) };
 		TrimInPlace(arg);
-		auto val = ParseFloat(arg);
-		if (!val) {
+
+		auto f = ParseFloat(arg);
+		if (!f) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: FBHeadScale arg not a float: '{}'", arg);
+				spdlog::warn("[FB] INI: FBScale arg not a float '{}' in '{}'", arg, std::string(tok));
 			}
 			return std::nullopt;
 		}
 
-		return *val;
+		ParsedScale out;
+		out.nodeName = *nodeName;
+		out.scale = *f;
+		return out;
 	}
 
-	// Parses token depending on section who:
-	//   Caster section: FBHeadScale(x)
-	//   Target section: 2_FBHeadScale(x) (mandatory 2_)
-	static std::optional<Command> ParseHeadScaleCommand(float t, const std::string& cmdTok, TargetKind who, bool strictIni)
+	// Parses one command token in context of section scope.
+	static std::optional<Command> ParseCommand(float t, const std::string& cmdTok, TargetKind who, bool strictIni)
 	{
+		// Enforce 2_ prefix rule
 		if (who == TargetKind::kTarget) {
 			if (cmdTok.rfind(std::string(kTargetPrefix), 0) != 0) {
 				if (strictIni) {
@@ -284,28 +342,27 @@ namespace
 				}
 				return std::nullopt;
 			}
+			std::string_view inner{ cmdTok.c_str() + kTargetPrefix.size(), cmdTok.size() - kTargetPrefix.size() };
 
-			std::string_view noPrefix{
-				cmdTok.c_str() + kTargetPrefix.size(),
-				cmdTok.size() - kTargetPrefix.size()
-			};
-
-			auto s = TryParseFBHeadScaleCall(noPrefix, strictIni);
-			if (!s) {
-				if (strictIni) {
-					spdlog::warn("[FB] INI: Unknown target command '{}'", cmdTok);
-				}
-				return std::nullopt;
+			// Only implement FBScale_* now
+			if (auto parsed = TryParseScaleToken(inner, strictIni)) {
+				Command c;
+				c.target = TargetKind::kTarget;
+				c.type = CommandType::kScale;
+				c.timeSeconds = t;
+				c.nodeName = parsed->nodeName;
+				c.scale = parsed->scale;
+				return c;
 			}
 
-			Command c;
-			c.target = TargetKind::kTarget;
-			c.type = CommandType::kHeadScale;
-			c.timeSeconds = t;
-			c.scale = *s;
-			return c;
+			// Future: FBVisible_*, FBSound_*, etc. (ignored for now)
+			if (strictIni) {
+				spdlog::warn("[FB] INI: unsupported/unknown target token '{}'", cmdTok);
+			}
+			return std::nullopt;
 		}
 		else {
+			// Caster section must NOT have 2_
 			if (cmdTok.rfind(std::string(kTargetPrefix), 0) == 0) {
 				if (strictIni) {
 					spdlog::warn("[FB] INI: Caster section must NOT use '2_' prefix, got '{}'", cmdTok);
@@ -313,32 +370,32 @@ namespace
 				return std::nullopt;
 			}
 
-			auto s = TryParseFBHeadScaleCall(cmdTok, strictIni);
-			if (!s) {
-				if (strictIni) {
-					spdlog::warn("[FB] INI: Unknown caster command '{}'", cmdTok);
-				}
-				return std::nullopt;
+			if (auto parsed = TryParseScaleToken(cmdTok, strictIni)) {
+				Command c;
+				c.target = TargetKind::kCaster;
+				c.type = CommandType::kScale;
+				c.timeSeconds = t;
+				c.nodeName = parsed->nodeName;
+				c.scale = parsed->scale;
+				return c;
 			}
 
-			Command c;
-			c.target = TargetKind::kCaster;
-			c.type = CommandType::kHeadScale;
-			c.timeSeconds = t;
-			c.scale = *s;
-			return c;
+			if (strictIni) {
+				spdlog::warn("[FB] INI: unsupported/unknown caster token '{}'", cmdTok);
+			}
+			return std::nullopt;
 		}
 	}
 
-	// FB section name:
-	//   FB:<timeline>|<Caster/Target>|<Thing>|<Function>
-	// Supported currently:
-	//   Thing=Head, Function=Scale
+	// =========================
+	// FB section name (2-part)
+	// =========================
+	//   FB:<timeline>|<Caster/Target>
 	struct FBSection
 	{
 		std::string timeline;
-		TargetKind  who{ TargetKind::kCaster };
-		bool        supported{ false };
+		TargetKind who{ TargetKind::kCaster };
+		bool supported{ false };
 	};
 
 	static std::optional<FBSection> ParseFBSectionName(const std::string& section, bool strictIni)
@@ -349,9 +406,9 @@ namespace
 
 		const std::string rest = section.substr(3);
 		auto parts = Split(rest, '|');
-		if (parts.size() != 4) {
+		if (parts.size() != 2) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: FB section expects 4 parts: '{}'", section);
+				spdlog::warn("[FB] INI: FB section expects 2 parts: '[FB:<timeline>|Caster/Target]' got '[{}]'", section);
 			}
 			return std::nullopt;
 		}
@@ -361,11 +418,7 @@ namespace
 		TrimInPlace(out.timeline);
 
 		std::string who = parts[1];
-		std::string thing = parts[2];
-		std::string func = parts[3];
 		TrimInPlace(who);
-		TrimInPlace(thing);
-		TrimInPlace(func);
 
 		if (IEquals(who, "Caster")) {
 			out.who = TargetKind::kCaster;
@@ -375,23 +428,34 @@ namespace
 		}
 		else {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: Unknown scope '{}' in section '{}'", who, section);
+				spdlog::warn("[FB] INI: Unknown scope '{}' in section '[{}]'", who, section);
 			}
-			return out;
+			return std::nullopt;
 		}
 
-		const bool isHead = IEquals(thing, "Head");
-		const bool isScale = IEquals(func, "Scale");
-		out.supported = isHead && isScale;
-
-		if (!out.supported && strictIni) {
-			spdlog::warn("[FB] INI: Unsupported FB section '{}|{}|{}' (ignored for now)",
-				who, thing, func);
-		}
-
+		// Currently all FB:* sections are supported as containers; individual tokens decide action.
+		out.supported = !out.timeline.empty();
 		return out;
 	}
 
+	// =========================
+	// Sorting + clamp
+	// =========================
+	static void SortAndClamp(std::vector<Command>& cmds)
+	{
+		for (auto& c : cmds) {
+			if (c.timeSeconds < 0.0f) {
+				c.timeSeconds = 0.0f;
+			}
+			// allow >1.0 for comedic/experimental scaling, clamp reasonable
+			c.scale = std::clamp(c.scale, 0.0f, 5.0f);
+		}
+		std::sort(cmds.begin(), cmds.end(), [](const auto& a, const auto& b) { return a.timeSeconds < b.timeSeconds; });
+	}
+
+	// =========================
+	// Load INI
+	// =========================
 	static void LoadConfigLocked()
 	{
 		Config newCfg;
@@ -451,16 +515,10 @@ namespace
 				TrimInPlace(key);
 				TrimInPlace(val);
 
-				if (IEquals(key, "bEnableTimelines") || IEquals(key, "bEnableHeadScaleTimelines") || IEquals(key, "bEnableHeadScaleTimelines")) {
+				if (IEquals(key, "bEnableHeadScaleTimelines")) {
 					newCfg.enableTimelines = ParseBool(val, newCfg.enableTimelines);
+					continue;
 				}
-				else if (IEquals(key, "bResetOnPairEnd")) {
-					newCfg.resetOnPairEnd = ParseBool(val, newCfg.resetOnPairEnd);
-				}
-				else if (IEquals(key, "bResetOnPairedStop")) {
-					newCfg.resetOnPairedStop = ParseBool(val, newCfg.resetOnPairedStop);
-				}
-				continue;
 			}
 
 			// [Debug]
@@ -522,7 +580,7 @@ namespace
 					continue;
 				}
 
-				if (auto cmd = ParseHeadScaleCommand(*t, cmdTok, activeFBSection->who, newCfg.dbg.strictIni)) {
+				if (auto cmd = ParseCommand(*t, cmdTok, activeFBSection->who, newCfg.dbg.strictIni)) {
 					newCfg.timelines[activeFBSection->timeline].push_back(*cmd);
 				}
 				continue;
@@ -617,13 +675,17 @@ namespace
 	}
 
 	// =========================
-	// Per-caster cancellation token + last target + debounce
+	// Per-caster cancellation token + last target + debounce + touched nodes
 	// =========================
 	struct ActorState
 	{
 		std::uint64_t token{ 0 };
 		RE::ActorHandle lastTarget{};
 		std::chrono::steady_clock::time_point lastStart{};
+
+		// Nodes touched on caster/target during the current timeline; used to reset only what we changed.
+		std::unordered_set<std::string_view> casterTouched;
+		std::unordered_set<std::string_view> targetTouched;
 	};
 
 	std::mutex g_stateMutex;
@@ -635,6 +697,9 @@ namespace
 		std::lock_guard _{ g_stateMutex };
 		auto& st = g_actorState[formID];
 		++st.token;
+		// new token implies new “run”; clear touched sets
+		st.casterTouched.clear();
+		st.targetTouched.clear();
 		return st.token;
 	}
 
@@ -672,6 +737,34 @@ namespace
 		}
 		st.lastStart = now;
 		return false;
+	}
+
+	static void MarkTouched(std::uint32_t casterFormID, TargetKind who, std::string_view nodeName)
+	{
+		std::lock_guard _{ g_stateMutex };
+		auto& st = g_actorState[casterFormID];
+		if (who == TargetKind::kCaster) {
+			st.casterTouched.insert(nodeName);
+		}
+		else {
+			st.targetTouched.insert(nodeName);
+		}
+	}
+
+	static std::vector<std::string_view> GetTouched(std::uint32_t casterFormID, TargetKind who)
+	{
+		std::lock_guard _{ g_stateMutex };
+		std::vector<std::string_view> out;
+		auto it = g_actorState.find(casterFormID);
+		if (it == g_actorState.end()) {
+			return out;
+		}
+		const auto& set = (who == TargetKind::kCaster) ? it->second.casterTouched : it->second.targetTouched;
+		out.reserve(set.size());
+		for (auto v : set) {
+			out.push_back(v);
+		}
+		return out;
 	}
 
 	// =========================
@@ -729,6 +822,9 @@ namespace
 		}
 
 		for (const auto& cmd : commands) {
+			// Mark touched immediately so reset will restore even if interrupted before command executes.
+			MarkTouched(casterFormID, cmd.target, cmd.nodeName);
+
 			std::thread([casterHandle, targetHandle, casterFormID, token, cmd, logOps = cfg.dbg.logOps]() {
 				if (cmd.timeSeconds > 0.0f) {
 					std::this_thread::sleep_for(std::chrono::duration<float>(cmd.timeSeconds));
@@ -738,12 +834,12 @@ namespace
 				}
 
 				switch (cmd.type) {
-				case CommandType::kHeadScale:
+				case CommandType::kScale:
 					if (cmd.target == TargetKind::kCaster) {
-						FB::Scaler::SetHeadScale(casterHandle, cmd.scale, logOps);
+						FB::Scaler::SetNodeScale(casterHandle, cmd.nodeName, cmd.scale, logOps);
 					}
 					else {
-						FB::Scaler::SetHeadScale(targetHandle, cmd.scale, logOps);
+						FB::Scaler::SetNodeScale(targetHandle, cmd.nodeName, cmd.scale, logOps);
 					}
 					break;
 				default:
@@ -763,12 +859,16 @@ namespace
 		const std::uint32_t casterFormID = caster->GetFormID();
 		(void)BumpTokenForCaster(caster);
 
-		// Reset caster head scale to 1.0f
-		FB::Scaler::SetHeadScale(caster->CreateRefHandle(), kResetScale, cfg.dbg.logOps);
-
-		// Reset last known target head scale to 1.0f
+		const auto casterHandle = caster->CreateRefHandle();
 		const auto targetHandle = GetLastTarget(casterFormID);
-		FB::Scaler::SetHeadScale(targetHandle, kResetScale, cfg.dbg.logOps);
+
+		// Reset only nodes we touched this run (future-proof and avoids surprise resets).
+		for (auto node : GetTouched(casterFormID, TargetKind::kCaster)) {
+			FB::Scaler::SetNodeScale(casterHandle, node, 1.0f, cfg.dbg.logOps);
+		}
+		for (auto node : GetTouched(casterFormID, TargetKind::kTarget)) {
+			FB::Scaler::SetNodeScale(targetHandle, node, 1.0f, cfg.dbg.logOps);
+		}
 	}
 
 	// =========================
@@ -796,12 +896,13 @@ namespace
 
 			if ((cfg.resetOnPairEnd && tag == kPairEndEvent) ||
 				(cfg.resetOnPairedStop && tag == kPairedStopEvent)) {
-				spdlog::info("[FB] '{}' on '{}' -> cancel + reset caster/target head scale",
+				spdlog::info("[FB] '{}' on '{}' -> cancel + reset (touched nodes only)",
 					std::string(tag), caster->GetName());
 				CancelAndReset(caster);
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
+			// Start timelines based on EventToTimeline mapping
 			StartTimelineForCaster(caster, tag);
 			return RE::BSEventNotifyControl::kContinue;
 		}
@@ -844,7 +945,7 @@ void LoadFBConfig()
 
 void LoadHeadScaleConfig()
 {
-	// Backward compatible wrapper so existing call sites keep working.
+	// Backward compatible wrapper
 	LoadFBConfig();
 }
 
@@ -854,5 +955,5 @@ void HeadScale(RE::Actor* actor, float scale)
 		return;
 	}
 	const auto& cfg = GetConfig();
-	FB::Scaler::SetHeadScale(actor->CreateRefHandle(), scale, cfg.dbg.logOps);
+	FB::Scaler::SetNodeScale(actor->CreateRefHandle(), FB::Scaler::kNodeHead, scale, cfg.dbg.logOps);
 }
