@@ -1,4 +1,7 @@
 // FullBodiedPlugin.cpp
+
+#include <memory>
+
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 
@@ -10,74 +13,81 @@
 
 namespace
 {
-    void SetupLogging()
-    {
-        auto path = SKSE::log::log_directory();
-        if (!path) {
-            return;
-        }
+	void SetupLogging()
+	{
+		auto path = SKSE::log::log_directory();
+		if (!path) {
+			// If this is null, SKSE couldn't resolve Documents\My Games\...\SKSE
+			// (usually profile / Documents redirection / permissions)
+			return;
+		}
 
-        *path /= "FullBodiedPlugin.log";
+		*path /= "FullBodiedPlugin.log";
 
-        auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
-        auto logger = std::make_shared<spdlog::logger>("global", sink);
+		auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
+		auto logger = std::make_shared<spdlog::logger>("global", sink);
 
-        spdlog::set_default_logger(std::move(logger));
-        spdlog::set_level(spdlog::level::info);
-        spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
-        spdlog::flush_on(spdlog::level::info);
+		spdlog::set_default_logger(std::move(logger));
+		spdlog::set_level(spdlog::level::info);
+		spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+		spdlog::flush_on(spdlog::level::info);
 
-        spdlog::info("Logging initialized: {}", path->string());
-    }
+		spdlog::info("Logging initialized: {}", path->string());
+	}
 
-    void RegisterSinksToPlayer()
-    {
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (!player) {
-            spdlog::warn("PlayerCharacter singleton not available yet.");
-            return;
-        }
+	void RegisterSinksToPlayer()
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			spdlog::warn("PlayerCharacter singleton not available yet.");
+			return;
+		}
 
-        // 1) Your custom sink that reacts to "ShrinkHeadEvent"
-        RegisterAnimationEventSink(player);
+		// Optional (but nice): parse INI once up front so the first event doesn't "pay" for it.
+		// This is the function we added in AnimationEvents.h / AnimationEvents.cpp.
+		LoadHeadShrinkConfig();
 
-        // 2) Your logger sink (AnimEventListener) that prints tags you care about
-        AnimEventListener::GetSingleton()->RegisterToPlayer();
+		// 1) Head-shrink sink (FB_HeadShrinkS### + config-driven timelines)
+		RegisterAnimationEventSink(player);
 
-        spdlog::info("Registered animation sinks to player.");
-    }
+		// 2) Your debug/logger sink (prints tags you care about)
+		AnimEventListener::GetSingleton()->RegisterToPlayer();
+
+		spdlog::info("Registered animation sinks to player.");
+	}
 }
 
 // CommonLibSSE-NG export macro (expands to exported SKSEPlugin_Load entry point)
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
-    SKSE::Init(skse);
-    SetupLogging();
+	SKSE::Init(skse);
+	SetupLogging();
 
-    spdlog::info("FullBodiedPlugin loaded");
+	spdlog::info("FullBodiedPlugin loaded");
 
-    // Don't register to the player here: during SKSEPluginLoad the player/graphs
-    // are often not ready yet. Use MessagingInterface events instead.
-    if (auto* messaging = SKSE::GetMessagingInterface()) {
-        messaging->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
-            if (!msg) {
-                return;
-            }
+	// Don't register to the player here: during SKSEPluginLoad the player/graphs
+	// are often not ready yet. Use MessagingInterface events instead.
+	if (auto* messaging = SKSE::GetMessagingInterface()) {
+		messaging->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
+			if (!msg) {
+				return;
+			}
 
-            switch (msg->type) {
-            case SKSE::MessagingInterface::kDataLoaded:
-            case SKSE::MessagingInterface::kNewGame:
-            case SKSE::MessagingInterface::kPostLoadGame:
-                RegisterSinksToPlayer();
-                break;
-            default:
-                break;
-            }
-            });
-    }
-    else {
-        spdlog::warn("Messaging interface not available.");
-    }
+			switch (msg->type) {
+			case SKSE::MessagingInterface::kDataLoaded:
+			case SKSE::MessagingInterface::kNewGame:
+			case SKSE::MessagingInterface::kPostLoadGame:
+				RegisterSinksToPlayer();
+				break;
 
-    return true;
+			default:
+				break;
+			}
+			});
+	}
+	else {
+		spdlog::warn("Messaging interface not available.");
+	}
+
+	return true;
 }
