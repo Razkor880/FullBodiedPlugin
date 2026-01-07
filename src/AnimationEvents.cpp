@@ -1,6 +1,6 @@
 // AnimationEvents.cpp
 //
-// FullBodiedPlugin – FB INI timeline parser (Scale system, expanding)
+// FullBodiedPlugin - FB INI timeline parser (Scale system, expanding)
 //
 // INI file name: FullBodiedIni.ini
 // Preferred: Data\FullBodiedIni.ini
@@ -31,9 +31,9 @@
 //   PairEnd and NPCPairedStop cancel pending tasks and reset caster + target (touched nodes only).
 
 #include "AnimationEvents.h"
-#include "FBScaler.h"
 #include "ActorManager.h"
 #include "FBConfig.h"
+#include "FBScaler.h"
 
 #include "RE/Skyrim.h"
 #include "SKSE/SKSE.h"
@@ -66,7 +66,6 @@ namespace
 	static constexpr std::string_view kPairEndEvent = "PairEnd";
 	static constexpr std::string_view kPairedStopEvent = "NPCPairedStop";
 
-
 	// Target search radius (tune as needed; 200–300 tends to work for paired idles)
 	static constexpr float kTargetSearchRadius = 250.0f;
 
@@ -75,9 +74,6 @@ namespace
 
 	// Target line prefix standard
 	static constexpr std::string_view kTargetPrefix = "2_";
-
-	// Current supported function:
-	static constexpr std::string_view kFuncScale = "FBScale";  // "FBScale_<Node>(x)"
 
 	// =========================
 	// Small string utils
@@ -161,6 +157,83 @@ namespace
 	}
 
 	// =========================
+	// Commands / Config model
+	// =========================
+	using FB::TargetKind;
+	using FB::TimedCommand;
+
+	// =========================
+	// Node mapping (stays here)
+	// =========================
+	static std::optional<std::string_view> ResolveNodeKey(std::string_view key)
+	{
+		// Author-facing NodeKey -> skeleton NiNode name mapping.
+		// Keep these keys stable; they are part of the INI “public API”.
+
+		// Head / Neck
+		if (key == "Head") return FB::Scaler::kNodeHead;
+		if (key == "Neck") return FB::Scaler::kNodeNeck;
+
+		// Spine
+		if (key == "Spine0") return FB::Scaler::kNodeSpine0;
+		if (key == "Spine1") return FB::Scaler::kNodeSpine1;
+		if (key == "Spine2") return FB::Scaler::kNodeSpine2;
+		if (key == "Spine3") return FB::Scaler::kNodeSpine3;
+
+		// Pelvis
+		if (key == "Pelvis") return FB::Scaler::kNodePelvis;
+
+		// Arms
+		if (key == "LClavicle") return FB::Scaler::kNodeLClavicle;
+		if (key == "RClavicle") return FB::Scaler::kNodeRClavicle;
+		if (key == "LUpperArm") return FB::Scaler::kNodeLUpperArm;
+		if (key == "RUpperArm") return FB::Scaler::kNodeRUpperArm;
+		if (key == "LForearm") return FB::Scaler::kNodeLForearm;
+		if (key == "RForearm") return FB::Scaler::kNodeRForearm;
+		if (key == "LHand") return FB::Scaler::kNodeLHand;
+		if (key == "RHand") return FB::Scaler::kNodeRHand;
+
+		// Legs
+		if (key == "LThigh") return FB::Scaler::kNodeLThigh;
+		if (key == "RThigh") return FB::Scaler::kNodeRThigh;
+		if (key == "LCalf") return FB::Scaler::kNodeLCalf;
+		if (key == "RCalf") return FB::Scaler::kNodeRCalf;
+		if (key == "LFoot") return FB::Scaler::kNodeLFoot;
+		if (key == "RFoot") return FB::Scaler::kNodeRFoot;
+		if (key == "LToe0") return FB::Scaler::kNodeLToe0;
+		if (key == "RToe0") return FB::Scaler::kNodeRToe0;
+
+		// Legacy convenience keys
+		if (key == "Spine") return FB::Scaler::kNodeSpine0;
+
+		return std::nullopt;
+	}
+
+	// =========================
+	// Debounce (event-level)
+	// =========================
+	static std::mutex g_debounceMutex;
+	static std::unordered_map<std::uint32_t, std::chrono::steady_clock::time_point> g_lastStart;
+
+	static bool ShouldDebounceStart(std::uint32_t casterFormID)
+	{
+		std::lock_guard _{ g_debounceMutex };
+
+		const auto now = std::chrono::steady_clock::now();
+		auto& last = g_lastStart[casterFormID];
+
+		if (last.time_since_epoch().count() != 0) {
+			const float dt = std::chrono::duration<float>(now - last).count();
+			if (dt < kStartDebounceSeconds) {
+				return true;
+			}
+		}
+
+		last = now;
+		return false;
+	}
+
+	// =========================
 	// Target resolution
 	// =========================
 	static RE::ActorHandle FindLikelyPairedTarget(RE::Actor* caster, bool log)
@@ -222,8 +295,8 @@ namespace
 	}
 
 	// =========================
-	// Timeline start + dispatch
-	// =========================
+// Timeline start + dispatch
+// =========================
 	static void StartTimelineForCaster(RE::Actor* caster, std::string_view startEventTag)
 	{
 		if (!caster) {
@@ -236,28 +309,25 @@ namespace
 			return;
 		}
 
-		const std::uint32_t casterFormID = caster->GetFormID();
-
-		// Map event tag -> timeline name
+		// 1) FIRST: check whether this tag is mapped at all
 		auto itMap = cfg.eventToTimeline.find(std::string(startEventTag));
 		if (itMap == cfg.eventToTimeline.end()) {
-			// Not a start tag; ignore without touching debounce.
-			return;
+			return;  // not a start tag we care about
 		}
 
-		// Debounce duplicate starts ONLY for mapped start tags
-		if (ShouldDebounceStart(casterFormID, startEventTag)) {
+		const std::string_view timelineName{ itMap->second };
+
+		// 2) THEN: debounce only real starts
+		const std::uint32_t casterFormID = caster->GetFormID();
+		if (ShouldDebounceStart(casterFormID)) {
 			if (cfg.dbg.logOps) {
-				spdlog::info("[FB] Debounce: ignoring mapped start '{}' on '{}'",
+				spdlog::info("[FB] Debounce: ignoring start '{}' on '{}'",
 					std::string(startEventTag), caster->GetName());
 			}
 			return;
 		}
 
-
-		const std::string_view timelineName{ itMap->second };
-
-		// Fetch commands
+		// 3) Now find the timeline commands
 		auto itTL = cfg.timelines.find(std::string(timelineName));
 		if (itTL == cfg.timelines.end() || itTL->second.empty()) {
 			if (cfg.dbg.logOps) {
@@ -266,7 +336,6 @@ namespace
 			return;
 		}
 
-		// Resolve target (existing logic)
 		auto targetHandle = FindLikelyPairedTarget(caster, cfg.dbg.logTargetResolve);
 
 		if (cfg.dbg.logOps && cfg.dbg.logTimelineStart) {
@@ -283,9 +352,11 @@ namespace
 			caster->CreateRefHandle(),
 			targetHandle,
 			casterFormID,
-			itTL->second,  // copy into ActorManager to ensure lifetime across detached threads
+			itTL->second,
 			cfg.dbg.logOps);
 	}
+
+
 
 	static void CancelAndReset(RE::Actor* caster)
 	{
@@ -338,7 +409,11 @@ namespace
 			}
 
 			// Start timelines based on EventToTimeline mapping
-			StartTimelineForCaster(caster, tag);
+			// Start timelines based on EventToTimeline mapping (quick prefilter)
+			if (cfg.eventToTimeline.contains(std::string(tag))) {
+				StartTimelineForCaster(caster, tag);
+			}
+
 			return RE::BSEventNotifyControl::kContinue;
 		}
 	};
@@ -376,7 +451,6 @@ void LoadFBConfig()
 	FB::Config::Reload(&ResolveNodeKey);
 }
 
-
 void LoadHeadScaleConfig()
 {
 	// Backward compatible wrapper
@@ -389,6 +463,5 @@ void HeadScale(RE::Actor* actor, float scale)
 		return;
 	}
 	const auto& cfg = FB::Config::Get(&ResolveNodeKey);
-
 	FB::Scaler::SetNodeScale(actor->CreateRefHandle(), FB::Scaler::kNodeHead, scale, cfg.dbg.logOps);
 }
