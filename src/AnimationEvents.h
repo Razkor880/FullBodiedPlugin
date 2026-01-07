@@ -1,14 +1,17 @@
 #pragma once
+
 #include "RE/Skyrim.h"
 
-// Register the animation graph event sink to an actor.
+// Register the animation graph event sink to a specific actor's graphs.
+// (Implemented in AnimationEvents.cpp)
 void RegisterAnimationEventSink(RE::Actor* actor);
 
-// Loads/refreshes FullBodiedIni.ini (preferred) / fallback.
-void LoadFBConfig();
+// Public API
+namespace FB
+{
+	// Loads/refreshes config from Data\FullBodiedIni.ini
+	void ReloadConfig();
 
-// Backward-compatible wrapper (older call sites may still call this).
-void LoadHeadScaleConfig();
-
-// Immediate scale helper (debug/manual use)
-void HeadScale(RE::Actor* actor, float scale);
+	// Convenience: registers the sink(s) to the player (calls RegisterAnimationEventSink internally)
+	void RegisterAnimationEventSinkToPlayer();
+}

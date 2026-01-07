@@ -43,17 +43,14 @@ namespace
 			return;
 		}
 
-		// Optional (but nice): parse INI once up front so the first event doesn't "pay" for it.
-		// This is the function we added in AnimationEvents.h / AnimationEvents.cpp.
-		LoadHeadScaleConfig();
+		FB::ReloadConfig();
+		FB::RegisterAnimationEventSinkToPlayer();
 
-		RegisterAnimationEventSink(player);
-
-		// 2) Your debug/logger sink (prints tags you care about)
 		AnimEventListener::GetSingleton()->RegisterToPlayer();
 
 		spdlog::info("Registered animation sinks to player.");
 	}
+
 }
 
 // CommonLibSSE-NG export macro (expands to exported SKSEPlugin_Load entry point)
