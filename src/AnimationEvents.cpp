@@ -7,7 +7,7 @@
 // Fallback:  Data\SKSE\Plugins\FullBodiedIni.ini
 //
 // Event mapping:
-//   [EventToTimeline]
+//   [EventToTimeline]   (also supports legacy [EventMap])
 //   <StartEventTag> = <TimelineName>
 //
 // Example:
@@ -25,21 +25,25 @@
 //   2_FBScale_<NodeKey>(<floatMultiplier>)
 //
 // Future extension:
-//   FBVisible_<NodeKey>(true/false) etc (parser already structured for this)
+//   FBVisible_<NodeKey>(true/false) etc (parser structured for this)
 //
 // Reset reinforcement:
-//   PairEnd and NPCPairedStop cancel pending tasks and reset caster + target (all nodes touched).
+//   PairEnd and NPCPairedStop cancel pending tasks and reset caster + target (touched nodes only).
 
 #include "AnimationEvents.h"
 #include "FBScaler.h"
+#include "ActorManager.h"
 
 #include "RE/Skyrim.h"
 #include "SKSE/SKSE.h"
+
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -70,9 +74,6 @@ namespace
 	// Target line prefix standard
 	static constexpr std::string_view kTargetPrefix = "2_";
 
-	// Command namespace prefix
-	static constexpr std::string_view kFBPrefix = "FB";
-
 	// Current supported function:
 	static constexpr std::string_view kFuncScale = "FBScale";  // "FBScale_<Node>(x)"
 
@@ -90,7 +91,8 @@ namespace
 	{
 		auto p1 = s.find(';');
 		auto p2 = s.find('#');
-		auto p = std::min(p1 == std::string::npos ? s.size() : p1, p2 == std::string::npos ? s.size() : p2);
+		auto p = std::min(p1 == std::string::npos ? s.size() : p1,
+			p2 == std::string::npos ? s.size() : p2);
 		if (p != std::string::npos && p < s.size()) {
 			s.resize(p);
 		}
@@ -159,37 +161,38 @@ namespace
 	// =========================
 	// Commands / Config model
 	// =========================
-	enum class TargetKind
+	using FB::TargetKind;
+	using FB::TimedCommand;
+
+	// Debounce is an event-level policy; keep it in AnimationEvents (not ActorManager).
+	std::mutex g_debounceMutex;
+	std::unordered_map<std::uint32_t, std::chrono::steady_clock::time_point> g_lastStart;
+
+	static bool ShouldDebounceStart(std::uint32_t casterFormID)
 	{
-		kCaster,
-		kTarget
-	};
+		std::lock_guard _{ g_debounceMutex };
 
-	enum class CommandType
-	{
-		kScale
-		// future: kVisible, kSound, kFace, kRM, etc.
-	};
+		const auto now = std::chrono::steady_clock::now();
+		auto& last = g_lastStart[casterFormID];
 
-	struct Command
-	{
-		TargetKind target{ TargetKind::kCaster };
-		CommandType type{ CommandType::kScale };
-		float timeSeconds{ 0.0f };
+		if (last.time_since_epoch().count() != 0) {
+			const float dt = std::chrono::duration<float>(now - last).count();
+			if (dt < kStartDebounceSeconds) {
+				return true;
+			}
+		}
 
-		// nodeName points to FB::Scaler::kNode* constants (static lifetime).
-		std::string_view nodeName{};
-
-		// payload
-		float scale{ 1.0f };
-	};
+		last = now;
+		return false;
+	}
 
 	struct DebugConfig
 	{
-		bool strictIni{ false };
-		bool logTimelineStart{ false };
+		bool strictIni{ true };
+		bool logOps{ true };
+		bool logIni{ true };
 		bool logTargetResolve{ false };
-		bool logOps{ false };
+		bool logTimelineStart{ true };  // used by parser + timeline start log gating
 	};
 
 	struct Config
@@ -203,7 +206,7 @@ namespace
 		std::unordered_map<std::string, std::string> eventToTimeline;
 
 		// Timeline name -> commands
-		std::unordered_map<std::string, std::vector<Command>> timelines;
+		std::unordered_map<std::string, std::vector<TimedCommand>> timelines;
 	};
 
 	std::mutex g_cfgMutex;
@@ -226,11 +229,8 @@ namespace
 	// =========================
 	// Node mapping
 	// =========================
-	// Map author-friendly NodeKeys to canonical skeleton node names.
-	// Keep keys stable; this is your “public API” for authors.
 	static std::optional<std::string_view> ResolveNodeKey(std::string_view key)
 	{
-		// NOTE: keys are case-sensitive as written; you can relax later if you want.
 		// Head / Neck
 		if (key == "Head") return FB::Scaler::kNodeHead;
 		if (key == "Neck") return FB::Scaler::kNodeNeck;
@@ -270,8 +270,6 @@ namespace
 	// =========================
 	// Parsing tokens
 	// =========================
-	// Parses: FBScale_<NodeKey>(<float>)
-	// Returns: (nodeName, scale)
 	struct ParsedScale
 	{
 		std::string_view nodeName{};
@@ -286,17 +284,16 @@ namespace
 			return std::nullopt;
 		}
 
-		// Find '(' and ')'
 		const size_t open = tok.find('(');
 		const size_t close = tok.rfind(')');
-		if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1 || close != tok.size() - 1) {
+		if (open == std::string_view::npos || close == std::string_view::npos ||
+			close <= open + 1 || close != tok.size() - 1) {
 			if (strictIni) {
 				spdlog::warn("[FB] INI: bad call syntax '{}'", std::string(tok));
 			}
 			return std::nullopt;
 		}
 
-		// NodeKey is between prefix and '(' and must include underscore format: FBScale_<NodeKey>(...)
 		if (open <= prefix.size()) {
 			if (strictIni) {
 				spdlog::warn("[FB] INI: missing NodeKey in '{}'", std::string(tok));
@@ -332,30 +329,29 @@ namespace
 	}
 
 	// Parses one command token in context of section scope.
-	static std::optional<Command> ParseCommand(float t, const std::string& cmdTok, TargetKind who, bool strictIni)
+	static std::optional<TimedCommand> ParseCommand(float t, const std::string& cmdTok, TargetKind who, bool strictIni)
 	{
-		// Enforce 2_ prefix rule
+		TimedCommand out{};
+		out.timeSeconds = t;
+
 		if (who == TargetKind::kTarget) {
+			// Target section must have 2_
 			if (cmdTok.rfind(std::string(kTargetPrefix), 0) != 0) {
 				if (strictIni) {
 					spdlog::warn("[FB] INI: Target section requires '2_' prefix, got '{}'", cmdTok);
 				}
 				return std::nullopt;
 			}
+
 			std::string_view inner{ cmdTok.c_str() + kTargetPrefix.size(), cmdTok.size() - kTargetPrefix.size() };
 
-			// Only implement FBScale_* now
 			if (auto parsed = TryParseScaleToken(inner, strictIni)) {
-				Command c;
-				c.target = TargetKind::kTarget;
-				c.type = CommandType::kScale;
-				c.timeSeconds = t;
-				c.nodeName = parsed->nodeName;
-				c.scale = parsed->scale;
-				return c;
+				out.target = TargetKind::kTarget;
+				out.nodeKey = parsed->nodeName;
+				out.scale = parsed->scale;
+				return out;
 			}
 
-			// Future: FBVisible_*, FBSound_*, etc. (ignored for now)
 			if (strictIni) {
 				spdlog::warn("[FB] INI: unsupported/unknown target token '{}'", cmdTok);
 			}
@@ -371,13 +367,10 @@ namespace
 			}
 
 			if (auto parsed = TryParseScaleToken(cmdTok, strictIni)) {
-				Command c;
-				c.target = TargetKind::kCaster;
-				c.type = CommandType::kScale;
-				c.timeSeconds = t;
-				c.nodeName = parsed->nodeName;
-				c.scale = parsed->scale;
-				return c;
+				out.target = TargetKind::kCaster;
+				out.nodeKey = parsed->nodeName;
+				out.scale = parsed->scale;
+				return out;
 			}
 
 			if (strictIni) {
@@ -390,7 +383,6 @@ namespace
 	// =========================
 	// FB section name (2-part)
 	// =========================
-	//   FB:<timeline>|<Caster/Target>
 	struct FBSection
 	{
 		std::string timeline;
@@ -433,7 +425,6 @@ namespace
 			return std::nullopt;
 		}
 
-		// Currently all FB:* sections are supported as containers; individual tokens decide action.
 		out.supported = !out.timeline.empty();
 		return out;
 	}
@@ -441,7 +432,7 @@ namespace
 	// =========================
 	// Sorting + clamp
 	// =========================
-	static void SortAndClamp(std::vector<Command>& cmds)
+	static void SortAndClamp(std::vector<TimedCommand>& cmds)
 	{
 		for (auto& c : cmds) {
 			if (c.timeSeconds < 0.0f) {
@@ -450,7 +441,8 @@ namespace
 			// allow >1.0 for comedic/experimental scaling, clamp reasonable
 			c.scale = std::clamp(c.scale, 0.0f, 5.0f);
 		}
-		std::sort(cmds.begin(), cmds.end(), [](const auto& a, const auto& b) { return a.timeSeconds < b.timeSeconds; });
+		std::sort(cmds.begin(), cmds.end(),
+			[](const auto& a, const auto& b) { return a.timeSeconds < b.timeSeconds; });
 	}
 
 	// =========================
@@ -504,7 +496,7 @@ namespace
 				continue;
 			}
 
-			// [General]
+			// [General] (supports old and new key names)
 			if (IEquals(currentSection, "General")) {
 				auto eq = line.find('=');
 				if (eq == std::string::npos) {
@@ -515,10 +507,17 @@ namespace
 				TrimInPlace(key);
 				TrimInPlace(val);
 
-				if (IEquals(key, "bEnableHeadScaleTimelines")) {
+				if (IEquals(key, "enableTimelines") || IEquals(key, "bEnableHeadScaleTimelines")) {
 					newCfg.enableTimelines = ParseBool(val, newCfg.enableTimelines);
-					continue;
 				}
+				else if (IEquals(key, "resetOnPairEnd")) {
+					newCfg.resetOnPairEnd = ParseBool(val, newCfg.resetOnPairEnd);
+				}
+				else if (IEquals(key, "resetOnPairedStop")) {
+					newCfg.resetOnPairedStop = ParseBool(val, newCfg.resetOnPairedStop);
+				}
+
+				continue;
 			}
 
 			// [Debug]
@@ -544,11 +543,15 @@ namespace
 				else if (IEquals(key, "bLogOps") || IEquals(key, "bLogHeadScale")) {
 					newCfg.dbg.logOps = ParseBool(val, newCfg.dbg.logOps);
 				}
+				else if (IEquals(key, "bLogIni")) {
+					newCfg.dbg.logIni = ParseBool(val, newCfg.dbg.logIni);
+				}
+
 				continue;
 			}
 
-			// [EventToTimeline]
-			if (IEquals(currentSection, "EventToTimeline")) {
+			// [EventToTimeline] (also supports legacy [EventMap])
+			if (IEquals(currentSection, "EventToTimeline") || IEquals(currentSection, "EventMap")) {
 				auto eq = line.find('=');
 				if (eq == std::string::npos) {
 					continue;
@@ -675,100 +678,7 @@ namespace
 	}
 
 	// =========================
-	// Per-caster cancellation token + last target + debounce + touched nodes
-	// =========================
-	struct ActorState
-	{
-		std::uint64_t token{ 0 };
-		RE::ActorHandle lastTarget{};
-		std::chrono::steady_clock::time_point lastStart{};
-
-		// Nodes touched on caster/target during the current timeline; used to reset only what we changed.
-		std::unordered_set<std::string_view> casterTouched;
-		std::unordered_set<std::string_view> targetTouched;
-	};
-
-	std::mutex g_stateMutex;
-	std::unordered_map<std::uint32_t, ActorState> g_actorState;  // caster FormID -> state
-
-	static std::uint64_t BumpTokenForCaster(RE::Actor* caster)
-	{
-		const auto formID = caster->GetFormID();
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[formID];
-		++st.token;
-		// new token implies new “run”; clear touched sets
-		st.casterTouched.clear();
-		st.targetTouched.clear();
-		return st.token;
-	}
-
-	static bool IsTokenCurrent(std::uint32_t casterFormID, std::uint64_t token)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto it = g_actorState.find(casterFormID);
-		return it != g_actorState.end() && it->second.token == token;
-	}
-
-	static void SetLastTarget(std::uint32_t casterFormID, RE::ActorHandle target)
-	{
-		std::lock_guard _{ g_stateMutex };
-		g_actorState[casterFormID].lastTarget = target;
-	}
-
-	static RE::ActorHandle GetLastTarget(std::uint32_t casterFormID)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto it = g_actorState.find(casterFormID);
-		return it == g_actorState.end() ? RE::ActorHandle{} : it->second.lastTarget;
-	}
-
-	static bool ShouldDebounceStart(std::uint32_t casterFormID)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[casterFormID];
-
-		const auto now = std::chrono::steady_clock::now();
-		if (st.lastStart.time_since_epoch().count() != 0) {
-			const float dt = std::chrono::duration<float>(now - st.lastStart).count();
-			if (dt < kStartDebounceSeconds) {
-				return true;
-			}
-		}
-		st.lastStart = now;
-		return false;
-	}
-
-	static void MarkTouched(std::uint32_t casterFormID, TargetKind who, std::string_view nodeName)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_actorState[casterFormID];
-		if (who == TargetKind::kCaster) {
-			st.casterTouched.insert(nodeName);
-		}
-		else {
-			st.targetTouched.insert(nodeName);
-		}
-	}
-
-	static std::vector<std::string_view> GetTouched(std::uint32_t casterFormID, TargetKind who)
-	{
-		std::lock_guard _{ g_stateMutex };
-		std::vector<std::string_view> out;
-		auto it = g_actorState.find(casterFormID);
-		if (it == g_actorState.end()) {
-			return out;
-		}
-		const auto& set = (who == TargetKind::kCaster) ? it->second.casterTouched : it->second.targetTouched;
-		out.reserve(set.size());
-		for (auto v : set) {
-			out.push_back(v);
-		}
-		return out;
-	}
-
-	// =========================
-	// Timeline start + schedule
+	// Timeline start + dispatch
 	// =========================
 	static void StartTimelineForCaster(RE::Actor* caster, std::string_view startEventTag)
 	{
@@ -781,72 +691,53 @@ namespace
 			return;
 		}
 
+		const std::uint32_t casterFormID = caster->GetFormID();
+
+		// Debounce duplicate start signals
+		if (ShouldDebounceStart(casterFormID)) {
+			if (cfg.dbg.logOps) {
+				spdlog::info("[FB] Debounce: ignoring start '{}' on '{}'",
+					std::string(startEventTag), caster->GetName());
+			}
+			return;
+		}
+
+		// Map event tag -> timeline name
 		auto itMap = cfg.eventToTimeline.find(std::string(startEventTag));
 		if (itMap == cfg.eventToTimeline.end()) {
-			return;  // not a start event we care about
+			return;
 		}
 
-		const std::string& timelineName = itMap->second;
-		auto itTl = cfg.timelines.find(timelineName);
-		if (itTl == cfg.timelines.end() || itTl->second.empty()) {
-			if (cfg.dbg.logTimelineStart) {
-				spdlog::info("[FB] Timeline: '{}' has no commands (event='{}')", timelineName, std::string(startEventTag));
+		const std::string_view timelineName{ itMap->second };
+
+		// Fetch commands
+		auto itTL = cfg.timelines.find(std::string(timelineName));
+		if (itTL == cfg.timelines.end() || itTL->second.empty()) {
+			if (cfg.dbg.logOps) {
+				spdlog::info("[FB] Timeline '{}' has no commands", std::string(timelineName));
 			}
 			return;
 		}
 
-		const std::uint32_t casterFormID = caster->GetFormID();
-		if (ShouldDebounceStart(casterFormID)) {
-			if (cfg.dbg.logTimelineStart) {
-				spdlog::info("[FB] Timeline: debounced duplicate start for actor='{}' event='{}'",
-					caster->GetName(), std::string(startEventTag));
-			}
-			return;
-		}
+		// Resolve target (existing logic)
+		auto targetHandle = FindLikelyPairedTarget(caster, cfg.dbg.logTargetResolve);
 
-		const auto casterHandle = caster->CreateRefHandle();
-		const auto targetHandle = FindLikelyPairedTarget(caster, cfg.dbg.logTargetResolve);
-
-		const std::uint64_t token = BumpTokenForCaster(caster);
-		SetLastTarget(casterFormID, targetHandle);
-
-		const auto commands = itTl->second;
-
-		if (cfg.dbg.logTimelineStart) {
-			spdlog::info("[FB] Timeline start: caster='{}' event='{}' timeline='{}' cmds={} token={}",
-				caster->GetName(),
+		if (cfg.dbg.logOps && cfg.dbg.logTimelineStart) {
+			auto t = targetHandle.get();
+			spdlog::info("[FB] StartTimeline: tag='{}' timeline='{}' caster='{}' target='{}' cmds={}",
 				std::string(startEventTag),
-				timelineName,
-				commands.size(),
-				token);
+				std::string(timelineName),
+				caster->GetName(),
+				t ? t->GetName() : "<none>",
+				itTL->second.size());
 		}
 
-		for (const auto& cmd : commands) {
-			// Mark touched immediately so reset will restore even if interrupted before command executes.
-			MarkTouched(casterFormID, cmd.target, cmd.nodeName);
-
-			std::thread([casterHandle, targetHandle, casterFormID, token, cmd, logOps = cfg.dbg.logOps]() {
-				if (cmd.timeSeconds > 0.0f) {
-					std::this_thread::sleep_for(std::chrono::duration<float>(cmd.timeSeconds));
-				}
-				if (!IsTokenCurrent(casterFormID, token)) {
-					return;
-				}
-
-				switch (cmd.type) {
-				case CommandType::kScale:
-					if (cmd.target == TargetKind::kCaster) {
-						FB::Scaler::SetNodeScale(casterHandle, cmd.nodeName, cmd.scale, logOps);
-					}
-					else {
-						FB::Scaler::SetNodeScale(targetHandle, cmd.nodeName, cmd.scale, logOps);
-					}
-					break;
-				default:
-					break;
-				}
-				}).detach();
-		}
+		FB::ActorManager::StartTimeline(
+			caster->CreateRefHandle(),
+			targetHandle,
+			casterFormID,
+			itTL->second,  // copy into ActorManager to ensure lifetime across detached threads
+			cfg.dbg.logOps);
 	}
 
 	static void CancelAndReset(RE::Actor* caster)
@@ -857,18 +748,11 @@ namespace
 
 		const auto& cfg = GetConfig();
 		const std::uint32_t casterFormID = caster->GetFormID();
-		(void)BumpTokenForCaster(caster);
 
-		const auto casterHandle = caster->CreateRefHandle();
-		const auto targetHandle = GetLastTarget(casterFormID);
-
-		// Reset only nodes we touched this run (future-proof and avoids surprise resets).
-		for (auto node : GetTouched(casterFormID, TargetKind::kCaster)) {
-			FB::Scaler::SetNodeScale(casterHandle, node, 1.0f, cfg.dbg.logOps);
-		}
-		for (auto node : GetTouched(casterFormID, TargetKind::kTarget)) {
-			FB::Scaler::SetNodeScale(targetHandle, node, 1.0f, cfg.dbg.logOps);
-		}
+		FB::ActorManager::CancelAndReset(
+			caster->CreateRefHandle(),
+			casterFormID,
+			cfg.dbg.logOps);
 	}
 
 	// =========================
@@ -896,8 +780,12 @@ namespace
 
 			if ((cfg.resetOnPairEnd && tag == kPairEndEvent) ||
 				(cfg.resetOnPairedStop && tag == kPairedStopEvent)) {
-				spdlog::info("[FB] '{}' on '{}' -> cancel + reset (touched nodes only)",
-					std::string(tag), caster->GetName());
+
+				if (cfg.dbg.logOps) {
+					spdlog::info("[FB] '{}' on '{}' -> cancel + reset (touched nodes only)",
+						std::string(tag), caster->GetName());
+				}
+
 				CancelAndReset(caster);
 				return RE::BSEventNotifyControl::kContinue;
 			}
