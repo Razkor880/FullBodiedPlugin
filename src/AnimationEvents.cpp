@@ -165,15 +165,40 @@ namespace
 	using FB::TimedCommand;
 
 	// Debounce is an event-level policy; keep it in AnimationEvents (not ActorManager).
+		// Debounce is an event-level policy; keep it in AnimationEvents (not ActorManager).
+	// IMPORTANT: debounce must apply only to *mapped start tags*, otherwise random vanilla tags
+	// will block the real trigger (as seen in your log).
 	std::mutex g_debounceMutex;
-	std::unordered_map<std::uint32_t, std::chrono::steady_clock::time_point> g_lastStart;
 
-	static bool ShouldDebounceStart(std::uint32_t casterFormID)
+	// Keyed by (casterFormID + startEventTagHash) so different mapped tags don't block each other.
+	std::unordered_map<std::uint64_t, std::chrono::steady_clock::time_point> g_lastStartByKey;
+
+	static std::uint32_t HashTag32(std::string_view s)
+	{
+		// FNV-1a 32-bit
+		std::uint32_t h = 2166136261u;
+		for (unsigned char c : s) {
+			h ^= c;
+			h *= 16777619u;
+		}
+		return h;
+	}
+
+	static std::uint64_t MakeDebounceKey(std::uint32_t casterFormID, std::string_view startEventTag)
+	{
+		const std::uint64_t hi = static_cast<std::uint64_t>(casterFormID) << 32;
+		const std::uint64_t lo = static_cast<std::uint64_t>(HashTag32(startEventTag));
+		return hi | lo;
+	}
+
+	static bool ShouldDebounceStart(std::uint32_t casterFormID, std::string_view startEventTag)
 	{
 		std::lock_guard _{ g_debounceMutex };
 
 		const auto now = std::chrono::steady_clock::now();
-		auto& last = g_lastStart[casterFormID];
+		const auto key = MakeDebounceKey(casterFormID, startEventTag);
+
+		auto& last = g_lastStartByKey[key];
 
 		if (last.time_since_epoch().count() != 0) {
 			const float dt = std::chrono::duration<float>(now - last).count();
@@ -185,6 +210,7 @@ namespace
 		last = now;
 		return false;
 	}
+
 
 	struct DebugConfig
 	{
@@ -475,39 +501,40 @@ namespace
 
 		spdlog::info("[FB] Config path: {}", path.string());
 
-		std::string currentSection;
-		std::string line;
+		// Read all lines so we can do 2 passes:
+		// Pass 1: parse General/Debug/EventToTimeline (get strictIni/log settings right)
+		// Pass 2: parse FB:* sections using the correct strictIni setting
+		std::vector<std::string> lines;
+		{
+			std::string line;
+			while (std::getline(in, line)) {
+				lines.push_back(std::move(line));
+			}
+		}
 
-		std::optional<FBSection> activeFBSection;
-
-		while (std::getline(in, line)) {
+		auto parse_non_fb_sections = [&](const std::string& currentSection, const std::string& lineRaw) {
+			std::string line = lineRaw;
 			StripInlineComment(line);
 			TrimInPlace(line);
 			if (line.empty()) {
-				continue;
+				return;
 			}
 
-			// Section header
-			if (line.size() >= 3 && line.front() == '[' && line.back() == ']') {
-				currentSection = line.substr(1, line.size() - 2);
-				TrimInPlace(currentSection);
-
-				activeFBSection = ParseFBSectionName(currentSection, newCfg.dbg.strictIni);
-				continue;
+			auto eq = line.find('=');
+			if (eq == std::string::npos) {
+				return;
 			}
 
-			// [General] (supports old and new key names)
+			std::string key = line.substr(0, eq);
+			std::string val = line.substr(eq + 1);
+			TrimInPlace(key);
+			TrimInPlace(val);
+
+			// [General]
 			if (IEquals(currentSection, "General")) {
-				auto eq = line.find('=');
-				if (eq == std::string::npos) {
-					continue;
-				}
-				std::string key = line.substr(0, eq);
-				std::string val = line.substr(eq + 1);
-				TrimInPlace(key);
-				TrimInPlace(val);
-
-				if (IEquals(key, "enableTimelines") || IEquals(key, "bEnableHeadScaleTimelines")) {
+				if (IEquals(key, "enableTimelines") ||
+					IEquals(key, "bEnableHeadScaleTimelines") ||
+					IEquals(key, "bEnableTimelines")) {
 					newCfg.enableTimelines = ParseBool(val, newCfg.enableTimelines);
 				}
 				else if (IEquals(key, "resetOnPairEnd")) {
@@ -516,21 +543,11 @@ namespace
 				else if (IEquals(key, "resetOnPairedStop")) {
 					newCfg.resetOnPairedStop = ParseBool(val, newCfg.resetOnPairedStop);
 				}
-
-				continue;
+				return;
 			}
 
 			// [Debug]
 			if (IEquals(currentSection, "Debug")) {
-				auto eq = line.find('=');
-				if (eq == std::string::npos) {
-					continue;
-				}
-				std::string key = line.substr(0, eq);
-				std::string val = line.substr(eq + 1);
-				TrimInPlace(key);
-				TrimInPlace(val);
-
 				if (IEquals(key, "bStrictIni")) {
 					newCfg.dbg.strictIni = ParseBool(val, newCfg.dbg.strictIni);
 				}
@@ -546,50 +563,84 @@ namespace
 				else if (IEquals(key, "bLogIni")) {
 					newCfg.dbg.logIni = ParseBool(val, newCfg.dbg.logIni);
 				}
-
-				continue;
+				return;
 			}
 
 			// [EventToTimeline] (also supports legacy [EventMap])
 			if (IEquals(currentSection, "EventToTimeline") || IEquals(currentSection, "EventMap")) {
-				auto eq = line.find('=');
-				if (eq == std::string::npos) {
-					continue;
-				}
-				std::string key = line.substr(0, eq);
-				std::string val = line.substr(eq + 1);
-				TrimInPlace(key);
-				TrimInPlace(val);
 				if (!key.empty() && !val.empty()) {
 					newCfg.eventToTimeline[key] = val;
 				}
-				continue;
+				return;
 			}
+			};
 
-			// FB:* sections
-			if (activeFBSection && activeFBSection->supported && !activeFBSection->timeline.empty()) {
-				std::istringstream iss(line);
-				std::string timeTok;
-				std::string cmdTok;
-				if (!(iss >> timeTok >> cmdTok)) {
+		// ---- Pass 1 ----
+		{
+			std::string currentSection;
+
+			for (const auto& raw : lines) {
+				std::string line = raw;
+				StripInlineComment(line);
+				TrimInPlace(line);
+				if (line.empty()) {
 					continue;
 				}
 
-				auto t = ParseFloat(timeTok);
-				if (!t) {
-					if (newCfg.dbg.strictIni) {
-						spdlog::warn("[FB] INI: bad time token '{}' in section '{}'", timeTok, currentSection);
+				if (line.size() >= 3 && line.front() == '[' && line.back() == ']') {
+					currentSection = line.substr(1, line.size() - 2);
+					TrimInPlace(currentSection);
+					continue;
+				}
+
+				parse_non_fb_sections(currentSection, raw);
+			}
+		}
+
+		// ---- Pass 2: FB sections ----
+		{
+			std::string currentSection;
+			std::optional<FBSection> activeFBSection;
+
+			for (const auto& raw : lines) {
+				std::string line = raw;
+				StripInlineComment(line);
+				TrimInPlace(line);
+				if (line.empty()) {
+					continue;
+				}
+
+				// Section header
+				if (line.size() >= 3 && line.front() == '[' && line.back() == ']') {
+					currentSection = line.substr(1, line.size() - 2);
+					TrimInPlace(currentSection);
+
+					activeFBSection = ParseFBSectionName(currentSection, newCfg.dbg.strictIni);
+					continue;
+				}
+
+				// FB:* sections
+				if (activeFBSection && activeFBSection->supported && !activeFBSection->timeline.empty()) {
+					std::istringstream iss(line);
+					std::string timeTok;
+					std::string cmdTok;
+					if (!(iss >> timeTok >> cmdTok)) {
+						continue;
 					}
-					continue;
-				}
 
-				if (auto cmd = ParseCommand(*t, cmdTok, activeFBSection->who, newCfg.dbg.strictIni)) {
-					newCfg.timelines[activeFBSection->timeline].push_back(*cmd);
+					auto t = ParseFloat(timeTok);
+					if (!t) {
+						if (newCfg.dbg.strictIni) {
+							spdlog::warn("[FB] INI: bad time token '{}' in section '{}'", timeTok, currentSection);
+						}
+						continue;
+					}
+
+					if (auto cmd = ParseCommand(*t, cmdTok, activeFBSection->who, newCfg.dbg.strictIni)) {
+						newCfg.timelines[activeFBSection->timeline].push_back(*cmd);
+					}
 				}
-				continue;
 			}
-
-			// Unknown content ignored
 		}
 
 		for (auto& [name, cmds] : newCfg.timelines) {
@@ -606,6 +657,7 @@ namespace
 		g_cfg = std::move(newCfg);
 		g_cfgLoaded = true;
 	}
+
 
 	static const Config& GetConfig()
 	{
@@ -693,20 +745,22 @@ namespace
 
 		const std::uint32_t casterFormID = caster->GetFormID();
 
-		// Debounce duplicate start signals
-		if (ShouldDebounceStart(casterFormID)) {
+		// Map event tag -> timeline name
+		auto itMap = cfg.eventToTimeline.find(std::string(startEventTag));
+		if (itMap == cfg.eventToTimeline.end()) {
+			// Not a start tag; ignore without touching debounce.
+			return;
+		}
+
+		// Debounce duplicate starts ONLY for mapped start tags
+		if (ShouldDebounceStart(casterFormID, startEventTag)) {
 			if (cfg.dbg.logOps) {
-				spdlog::info("[FB] Debounce: ignoring start '{}' on '{}'",
+				spdlog::info("[FB] Debounce: ignoring mapped start '{}' on '{}'",
 					std::string(startEventTag), caster->GetName());
 			}
 			return;
 		}
 
-		// Map event tag -> timeline name
-		auto itMap = cfg.eventToTimeline.find(std::string(startEventTag));
-		if (itMap == cfg.eventToTimeline.end()) {
-			return;
-		}
 
 		const std::string_view timelineName{ itMap->second };
 
