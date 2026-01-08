@@ -1,6 +1,6 @@
 #include "FBConfig.h"
 #include "ActorManager.h"   // TargetKind / TimedCommand / CommandKind
-#include "FBMorph.h"        // Morph key constants
+#include "FBMorph.h"        // (still included; not required anymore, but harmless)
 
 #include <spdlog/spdlog.h>
 
@@ -235,9 +235,22 @@ namespace
 
 	struct ParsedMorph
 	{
-		std::string_view morphKey{};
+		std::string morphName;  // OWNS
 		float delta{ 0.0f };
 	};
+
+	static std::string ResolveMorphAlias(std::string_view authorKey)
+	{
+		// INI tokens must not contain spaces (parser uses >>), but RaceMenu morph names often do.
+		// Add aliases here when you want author-friendly tokens.
+
+		if (authorKey == "VorePreyBelly" || authorKey == "Vore_Prey_Belly") {
+			return "Vore Prey Belly";
+		}
+
+		// Default: use token as-is
+		return std::string(authorKey);
+	}
 
 	static std::optional<ParsedMorph> TryParseMorphToken(std::string_view tok, bool strictIni)
 	{
@@ -263,17 +276,12 @@ namespace
 			return std::nullopt;
 		}
 
-		const std::string_view key = tok.substr(prefix.size(), open - prefix.size());
+		const std::string_view authorKey = tok.substr(prefix.size(), open - prefix.size());
+		std::string morphName = ResolveMorphAlias(authorKey);
 
-		// Map author-facing key -> canonical FB::Morph key (stable)
-		std::optional<std::string_view> canonical;
-		if (key == "Vore Prey Belly") {
-			canonical = FB::Morph::kMorph_VorePreyBelly;
-		}
-
-		if (!canonical) {
+		if (morphName.empty()) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: unknown MorphKey '{}' in '{}'", std::string(key), std::string(tok));
+				spdlog::warn("[FB] INI: empty MorphKey in '{}'", std::string(tok));
 			}
 			return std::nullopt;
 		}
@@ -290,7 +298,7 @@ namespace
 		}
 
 		ParsedMorph out;
-		out.morphKey = *canonical;
+		out.morphName = std::move(morphName);
 		out.delta = *f;
 		return out;
 	}
@@ -323,7 +331,7 @@ namespace
 				c.timeSeconds = t;
 				c.kind = FB::CommandKind::kMorph;
 				c.target = dest;
-				c.morphName = std::string(m->morphKey);  // OWN it (no dangling views)
+				c.morphName = m->morphName;  // OWNED std::string
 				c.delta = m->delta;
 				return c;
 			}

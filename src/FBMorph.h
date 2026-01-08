@@ -3,9 +3,7 @@
 #include "RE/Skyrim.h"
 
 #include <cstdint>
-#include <string>
 #include <string_view>
-#include <unordered_map>
 
 namespace FB::Morph
 {
@@ -20,14 +18,16 @@ namespace FB::Morph
 	inline constexpr float kMinValue = 0.0f;
 	inline constexpr float kMaxValue = 100.0f;
 
-	// Add delta to this plugin's current value for (actor, morphKey)
+	// Add delta to this plugin's current value for (actor, morphKey).
+	// Also enables "sticky" re-apply for a short window so the value doesn't get overwritten between timeline ticks.
 	void AddDelta(
 		RE::ActorHandle actor,
 		std::string_view morphKey,
 		float delta,
 		bool logOps);
 
-	// Clear all morphs applied by this plugin (by key) for actor
+	// Clear all morphs applied by this plugin (by key) for actor.
+	// Also stops any sticky re-apply loops for that actor.
 	void ResetAllForActor(
 		RE::ActorHandle actor,
 		bool logOps);
