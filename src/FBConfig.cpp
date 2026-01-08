@@ -1,10 +1,11 @@
 #include "FBConfig.h"
+#include "ActorManager.h"   // TargetKind / TimedCommand / CommandKind
+#include "FBMorph.h"        // Morph key constants
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -19,9 +20,12 @@
 
 namespace
 {
-	// Target line prefix standard
+	// Target line prefix standard (tokens inside [FB:...|Target] must be prefixed)
 	static constexpr std::string_view kTargetPrefix = "2_";
 
+	// -------------------------
+	// Small string utils
+	// -------------------------
 	static inline void TrimInPlace(std::string& s)
 	{
 		auto notSpace = [](unsigned char c) { return !std::isspace(c); };
@@ -110,7 +114,9 @@ namespace
 		return std::filesystem::path("Data") / "SKSE" / "Plugins" / "FullBodiedIni.ini";
 	}
 
-	//   FB:<timeline>|<Caster/Target>
+	// -------------------------
+	// FB section header: [FB:<timeline>|Caster/Target]
+	// -------------------------
 	struct FBSection
 	{
 		std::string timeline;
@@ -157,6 +163,9 @@ namespace
 		return out;
 	}
 
+	// -------------------------
+	// Token parsers
+	// -------------------------
 	struct ParsedScale
 	{
 		std::string_view nodeName{};
@@ -224,6 +233,68 @@ namespace
 		return out;
 	}
 
+	struct ParsedMorph
+	{
+		std::string_view morphKey{};
+		float delta{ 0.0f };
+	};
+
+	static std::optional<ParsedMorph> TryParseMorphToken(std::string_view tok, bool strictIni)
+	{
+		const std::string_view prefix = "FBMorph_";
+		if (tok.rfind(prefix, 0) != 0) {
+			return std::nullopt;
+		}
+
+		const size_t open = tok.find('(');
+		const size_t close = tok.rfind(')');
+		if (open == std::string_view::npos || close == std::string_view::npos ||
+			close <= open + 1 || close != tok.size() - 1) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: bad call syntax '{}'", std::string(tok));
+			}
+			return std::nullopt;
+		}
+
+		if (open <= prefix.size()) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: missing MorphKey in '{}'", std::string(tok));
+			}
+			return std::nullopt;
+		}
+
+		const std::string_view key = tok.substr(prefix.size(), open - prefix.size());
+
+		// Map author-facing key -> canonical FB::Morph key (stable)
+		std::optional<std::string_view> canonical;
+		if (key == "Vore Prey Belly") {
+			canonical = FB::Morph::kMorph_VorePreyBelly;
+		}
+
+		if (!canonical) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: unknown MorphKey '{}' in '{}'", std::string(key), std::string(tok));
+			}
+			return std::nullopt;
+		}
+
+		std::string arg{ tok.substr(open + 1, close - open - 1) };
+		TrimInPlace(arg);
+
+		auto f = ParseFloat(arg);
+		if (!f) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: FBMorph arg not a float '{}' in '{}'", arg, std::string(tok));
+			}
+			return std::nullopt;
+		}
+
+		ParsedMorph out;
+		out.morphKey = *canonical;
+		out.delta = *f;
+		return out;
+	}
+
 	static std::optional<FB::TimedCommand> ParseCommand(
 		float t,
 		const std::string& cmdTok,
@@ -234,7 +305,34 @@ namespace
 		FB::TimedCommand out{};
 		out.timeSeconds = t;
 
+		auto parse_inner = [&](std::string_view tokenView, FB::TargetKind dest) -> std::optional<FB::TimedCommand> {
+			// Scale
+			if (auto s = TryParseScaleToken(tokenView, strictIni, resolver)) {
+				FB::TimedCommand c{};
+				c.timeSeconds = t;
+				c.kind = FB::CommandKind::kScale;
+				c.target = dest;
+				c.nodeKey = s->nodeName;
+				c.scale = s->scale;
+				return c;
+			}
+
+			// Morph
+			if (auto m = TryParseMorphToken(tokenView, strictIni)) {
+				FB::TimedCommand c{};
+				c.timeSeconds = t;
+				c.kind = FB::CommandKind::kMorph;
+				c.target = dest;
+				c.morphName = std::string(m->morphKey);  // OWN it (no dangling views)
+				c.delta = m->delta;
+				return c;
+			}
+
+			return std::nullopt;
+			};
+
 		if (who == FB::TargetKind::kTarget) {
+			// Target section REQUIRES "2_" prefix
 			if (cmdTok.rfind(std::string(kTargetPrefix), 0) != 0) {
 				if (strictIni) {
 					spdlog::warn("[FB] INI: Target section requires '2_' prefix, got '{}'", cmdTok);
@@ -244,11 +342,8 @@ namespace
 
 			std::string_view inner{ cmdTok.c_str() + kTargetPrefix.size(), cmdTok.size() - kTargetPrefix.size() };
 
-			if (auto parsed = TryParseScaleToken(inner, strictIni, resolver)) {
-				out.target = FB::TargetKind::kTarget;
-				out.nodeKey = parsed->nodeName;
-				out.scale = parsed->scale;
-				return out;
+			if (auto cmd = parse_inner(inner, FB::TargetKind::kTarget)) {
+				return cmd;
 			}
 
 			if (strictIni) {
@@ -256,26 +351,23 @@ namespace
 			}
 			return std::nullopt;
 		}
-		else {
-			if (cmdTok.rfind(std::string(kTargetPrefix), 0) == 0) {
-				if (strictIni) {
-					spdlog::warn("[FB] INI: Caster section must NOT use '2_' prefix, got '{}'", cmdTok);
-				}
-				return std::nullopt;
-			}
 
-			if (auto parsed = TryParseScaleToken(cmdTok, strictIni, resolver)) {
-				out.target = FB::TargetKind::kCaster;
-				out.nodeKey = parsed->nodeName;
-				out.scale = parsed->scale;
-				return out;
-			}
-
+		// Caster section must NOT use "2_"
+		if (cmdTok.rfind(std::string(kTargetPrefix), 0) == 0) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: unsupported/unknown caster token '{}'", cmdTok);
+				spdlog::warn("[FB] INI: Caster section must NOT use '2_' prefix, got '{}'", cmdTok);
 			}
 			return std::nullopt;
 		}
+
+		if (auto cmd = parse_inner(cmdTok, FB::TargetKind::kCaster)) {
+			return cmd;
+		}
+
+		if (strictIni) {
+			spdlog::warn("[FB] INI: unsupported/unknown caster token '{}'", cmdTok);
+		}
+		return std::nullopt;
 	}
 
 	static void SortAndClamp(std::vector<FB::TimedCommand>& cmds)
@@ -284,8 +376,16 @@ namespace
 			if (c.timeSeconds < 0.0f) {
 				c.timeSeconds = 0.0f;
 			}
-			c.scale = std::clamp(c.scale, 0.0f, 5.0f);
+
+			if (c.kind == FB::CommandKind::kScale) {
+				c.scale = std::clamp(c.scale, 0.0f, 5.0f);
+			}
+			else if (c.kind == FB::CommandKind::kMorph) {
+				// Safety clamp. FBMorph clamps final accumulated value to [0..100].
+				c.delta = std::clamp(c.delta, -1000.0f, 1000.0f);
+			}
 		}
+
 		std::sort(cmds.begin(), cmds.end(),
 			[](const auto& a, const auto& b) { return a.timeSeconds < b.timeSeconds; });
 	}
@@ -325,7 +425,7 @@ namespace
 
 		spdlog::info("[FB] Config path: {}", path.string());
 
-		// Read whole file for 2-pass parse (so Debug/General are known before FB sections)
+		// Read whole file for 2-pass parse
 		std::vector<std::string> lines;
 		{
 			std::string line;
@@ -365,6 +465,12 @@ namespace
 				else if (IEquals(key, "resetOnPairedStop")) {
 					newCfg.resetOnPairedStop = ParseBool(val, newCfg.resetOnPairedStop);
 				}
+				else if (IEquals(key, "resetMorphsOnPairEnd")) {
+					newCfg.resetMorphsOnPairEnd = ParseBool(val, newCfg.resetMorphsOnPairEnd);
+				}
+				else if (IEquals(key, "resetMorphsOnPairedStop")) {
+					newCfg.resetMorphsOnPairedStop = ParseBool(val, newCfg.resetMorphsOnPairedStop);
+				}
 				return;
 			}
 
@@ -397,7 +503,7 @@ namespace
 			}
 			};
 
-		// Pass 1: General/Debug/EventToTimeline
+		// Pass 1
 		{
 			std::string currentSection;
 
@@ -443,6 +549,8 @@ namespace
 					std::istringstream iss(line);
 					std::string timeTok;
 					std::string cmdTok;
+
+					// IMPORTANT: command token must not contain spaces (e.g. "FBMorph_X(10)" is OK)
 					if (!(iss >> timeTok >> cmdTok)) {
 						continue;
 					}
@@ -466,10 +574,13 @@ namespace
 			SortAndClamp(cmds);
 		}
 
-		spdlog::info("[FB] Config loaded: enableTimelines={} resetOnPairEnd={} resetOnPairedStop={} eventMaps={} timelines={}",
+		spdlog::info(
+			"[FB] Config loaded: enableTimelines={} resetOnPairEnd={} resetOnPairedStop={} resetMorphsOnPairEnd={} resetMorphsOnPairedStop={} eventMaps={} timelines={}",
 			newCfg.enableTimelines,
 			newCfg.resetOnPairEnd,
 			newCfg.resetOnPairedStop,
+			newCfg.resetMorphsOnPairEnd,
+			newCfg.resetMorphsOnPairedStop,
 			newCfg.eventToTimeline.size(),
 			newCfg.timelines.size());
 

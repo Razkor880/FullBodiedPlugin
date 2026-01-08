@@ -21,13 +21,23 @@ namespace FB::Config
 		bool logIni{ true };
 		bool logTargetResolve{ false };
 		bool logTimelineStart{ true };
+		bool resetMorphsOnPairEnd{ true };
+		bool resetMorphsOnPairedStop{ true };
+
 	};
 
 	struct ConfigData
 	{
 		bool enableTimelines{ true };
+
+		// Scale/visibility/etc reset behavior (existing)
 		bool resetOnPairEnd{ true };
 		bool resetOnPairedStop{ true };
+
+		// NEW: Morph reset behavior (RaceMenu/NiOverride key cleanup)
+		bool resetMorphsOnPairEnd{ true };
+		bool resetMorphsOnPairedStop{ true };  // optional but recommended for parity
+
 		DebugConfig dbg{};
 
 		// StartEventTag -> TimelineName

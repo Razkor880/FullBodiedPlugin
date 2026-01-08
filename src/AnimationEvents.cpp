@@ -96,6 +96,9 @@ namespace
 		}
 	}
 
+	
+
+
 	static inline bool IEquals(const std::string& a, const char* b)
 	{
 		size_t i = 0;
@@ -358,7 +361,7 @@ namespace
 
 
 
-	static void CancelAndReset(RE::Actor* caster)
+	static void CancelAndReset(RE::Actor* caster, std::string_view tag)
 	{
 		if (!caster) {
 			return;
@@ -367,11 +370,21 @@ namespace
 		const auto& cfg = FB::Config::Get(&ResolveNodeKey);
 		const std::uint32_t casterFormID = caster->GetFormID();
 
+		const bool isPairEnd = (tag == kPairEndEvent);
+		const bool isPairedStop = (tag == kPairedStopEvent);
+
+		const bool doMorphReset =
+			(isPairEnd && cfg.resetMorphsOnPairEnd) ||
+			(isPairedStop && cfg.resetMorphsOnPairedStop);
+
 		FB::ActorManager::CancelAndReset(
 			caster->CreateRefHandle(),
 			casterFormID,
-			cfg.dbg.logOps);
+			cfg.dbg.logOps,
+			/*resetMorphsForCaster=*/doMorphReset,
+			/*resetMorphsForTarget=*/doMorphReset);
 	}
+
 
 	// =========================
 	// Event sink
@@ -400,11 +413,11 @@ namespace
 				(cfg.resetOnPairedStop && tag == kPairedStopEvent)) {
 
 				if (cfg.dbg.logOps) {
-					spdlog::info("[FB] '{}' on '{}' -> cancel + reset (touched nodes only)",
+					spdlog::info("[FB] '{}' on '{}' -> cancel + reset",
 						std::string(tag), caster->GetName());
 				}
 
-				CancelAndReset(caster);
+				CancelAndReset(caster, tag);
 				return RE::BSEventNotifyControl::kContinue;
 			}
 

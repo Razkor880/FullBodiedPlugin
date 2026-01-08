@@ -1,6 +1,7 @@
 #include "ActorManager.h"
 
 #include "FBScaler.h"
+#include "FBMorph.h"      // <-- add this
 
 #include <spdlog/spdlog.h>
 
@@ -13,147 +14,192 @@
 
 namespace
 {
-	struct ActorRuntimeState
-	{
-		std::uint64_t token{ 0 };
-		RE::ActorHandle lastTarget{};
+    struct ActorRuntimeState
+    {
+        std::uint64_t token{ 0 };
+        RE::ActorHandle lastTarget{};
 
-		std::unordered_set<std::string_view> casterTouched;
-		std::unordered_set<std::string_view> targetTouched;
-	};
+        std::unordered_set<std::string_view> casterTouchedScale;
+        std::unordered_set<std::string_view> targetTouchedScale;
 
-	std::mutex g_stateMutex;
-	std::unordered_map<std::uint32_t, ActorRuntimeState> g_state;  // caster FormID -> runtime state
+        bool casterTouchedMorph{ false };
+        bool targetTouchedMorph{ false };
+    };
 
-	static std::uint64_t BumpToken(std::uint32_t casterFormID)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_state[casterFormID];
-		++st.token;
+    std::mutex g_stateMutex;
+    std::unordered_map<std::uint32_t, ActorRuntimeState> g_state;
 
-		// New run / cancel: clear touched sets (we only reset nodes touched in the current run)
-		st.casterTouched.clear();
-		st.targetTouched.clear();
-		return st.token;
-	}
+    static std::uint64_t BumpToken(std::uint32_t casterFormID)
+    {
+        std::lock_guard _{ g_stateMutex };
+        auto& st = g_state[casterFormID];
+        ++st.token;
 
-	static bool IsTokenCurrent(std::uint32_t casterFormID, std::uint64_t token)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto it = g_state.find(casterFormID);
-		return it != g_state.end() && it->second.token == token;
-	}
+        st.casterTouchedScale.clear();
+        st.targetTouchedScale.clear();
+        st.casterTouchedMorph = false;
+        st.targetTouchedMorph = false;
 
-	static void SetLastTarget(std::uint32_t casterFormID, RE::ActorHandle target)
-	{
-		std::lock_guard _{ g_stateMutex };
-		g_state[casterFormID].lastTarget = target;
-	}
+        return st.token;
+    }
 
-	static RE::ActorHandle GetLastTarget(std::uint32_t casterFormID)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto it = g_state.find(casterFormID);
-		return it == g_state.end() ? RE::ActorHandle{} : it->second.lastTarget;
-	}
+    static bool IsTokenCurrent(std::uint32_t casterFormID, std::uint64_t token)
+    {
+        std::lock_guard _{ g_stateMutex };
+        auto it = g_state.find(casterFormID);
+        return it != g_state.end() && it->second.token == token;
+    }
 
-	static void MarkTouched(std::uint32_t casterFormID, FB::TargetKind who, std::string_view nodeKey)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_state[casterFormID];
-		if (who == FB::TargetKind::kCaster) {
-			st.casterTouched.insert(nodeKey);
-		}
-		else {
-			st.targetTouched.insert(nodeKey);
-		}
-	}
+    static void SetLastTarget(std::uint32_t casterFormID, RE::ActorHandle target)
+    {
+        std::lock_guard _{ g_stateMutex };
+        g_state[casterFormID].lastTarget = target;
+    }
 
-	static std::pair<std::unordered_set<std::string_view>, std::unordered_set<std::string_view>>
-		TakeTouchedSets(std::uint32_t casterFormID)
-	{
-		std::lock_guard _{ g_stateMutex };
-		auto& st = g_state[casterFormID];
+    static RE::ActorHandle GetLastTarget(std::uint32_t casterFormID)
+    {
+        std::lock_guard _{ g_stateMutex };
+        auto it = g_state.find(casterFormID);
+        return it == g_state.end() ? RE::ActorHandle{} : it->second.lastTarget;
+    }
 
-		auto caster = std::move(st.casterTouched);
-		auto target = std::move(st.targetTouched);
+    static void MarkTouchedScale(std::uint32_t casterFormID, FB::TargetKind who, std::string_view nodeKey)
+    {
+        std::lock_guard _{ g_stateMutex };
+        auto& st = g_state[casterFormID];
+        if (who == FB::TargetKind::kCaster) {
+            st.casterTouchedScale.insert(nodeKey);
+        }
+        else {
+            st.targetTouchedScale.insert(nodeKey);
+        }
+    }
 
-		st.casterTouched.clear();
-		st.targetTouched.clear();
+    static void MarkTouchedMorph(std::uint32_t casterFormID, FB::TargetKind who)
+    {
+        std::lock_guard _{ g_stateMutex };
+        auto& st = g_state[casterFormID];
+        if (who == FB::TargetKind::kCaster) {
+            st.casterTouchedMorph = true;
+        }
+        else {
+            st.targetTouchedMorph = true;
+        }
+    }
 
-		return { std::move(caster), std::move(target) };
-	}
+    struct ResetSnapshot
+    {
+        RE::ActorHandle lastTarget{};
+        std::unordered_set<std::string_view> casterScale;
+        std::unordered_set<std::string_view> targetScale;
+        bool casterMorph{ false };
+        bool targetMorph{ false };
+    };
+
+    static ResetSnapshot TakeSnapshot(std::uint32_t casterFormID)
+    {
+        std::lock_guard _{ g_stateMutex };
+        auto& st = g_state[casterFormID];
+
+        ResetSnapshot out;
+        out.lastTarget = st.lastTarget;
+        out.casterScale = std::move(st.casterTouchedScale);
+        out.targetScale = std::move(st.targetTouchedScale);
+        out.casterMorph = st.casterTouchedMorph;
+        out.targetMorph = st.targetTouchedMorph;
+
+        st.casterTouchedScale.clear();
+        st.targetTouchedScale.clear();
+        st.casterTouchedMorph = false;
+        st.targetTouchedMorph = false;
+
+        return out;
+    }
 }
 
 namespace FB::ActorManager
 {
-	void StartTimeline(
-		RE::ActorHandle caster,
-		RE::ActorHandle target,
-		std::uint32_t casterFormID,
-		std::vector<FB::TimedCommand> commands,
-		bool logOps)
-	{
-		if (!caster) {
-			return;
-		}
+    void StartTimeline(
+        RE::ActorHandle caster,
+        RE::ActorHandle target,
+        std::uint32_t casterFormID,
+        std::vector<FB::TimedCommand> commands,
+        bool logOps)
+    {
+        if (!caster) {
+            return;
+        }
 
-		const auto token = BumpToken(casterFormID);
-		SetLastTarget(casterFormID, target);
+        const auto token = BumpToken(casterFormID);
+        SetLastTarget(casterFormID, target);
 
-		// Detach one worker per command (preserving previous behavior)
-		for (const auto& cmd : commands) {
-			std::thread([caster, target, casterFormID, token, cmd, logOps]() {
-				if (cmd.timeSeconds > 0.0f) {
-					std::this_thread::sleep_for(std::chrono::duration<float>(cmd.timeSeconds));
-				}
+        for (const auto& cmd : commands) {
+            std::thread([caster, target, casterFormID, token, cmd, logOps]() mutable {
+                if (cmd.timeSeconds > 0.0f) {
+                    std::this_thread::sleep_for(std::chrono::duration<float>(cmd.timeSeconds));
+                }
 
-				if (!IsTokenCurrent(casterFormID, token)) {
-					return;
-				}
+                if (!IsTokenCurrent(casterFormID, token)) {
+                    return;
+                }
 
-				const auto actorHandle = (cmd.target == FB::TargetKind::kCaster) ? caster : target;
-				if (!actorHandle) {
-					return;
-				}
+                const auto actorHandle = (cmd.target == FB::TargetKind::kCaster) ? caster : target;
+                if (!actorHandle) {
+                    return;
+                }
 
-				FB::Scaler::SetNodeScale(actorHandle, cmd.nodeKey, cmd.scale, logOps);
-				MarkTouched(casterFormID, cmd.target, cmd.nodeKey);
-				}).detach();
-		}
-	}
+                if (cmd.kind == FB::CommandKind::kScale) {
+                    FB::Scaler::SetNodeScale(actorHandle, cmd.nodeKey, cmd.scale, logOps);
+                    MarkTouchedScale(casterFormID, cmd.target, cmd.nodeKey);
+                }
+                else if (cmd.kind == FB::CommandKind::kMorph) {
+                    FB::Morph::AddDelta(actorHandle, cmd.morphName, cmd.delta, logOps);
+                    MarkTouchedMorph(casterFormID, cmd.target);
+                }
+                }).detach();
+        }
+    }
 
-	void CancelAndReset(
-		RE::ActorHandle caster,
-		std::uint32_t casterFormID,
-		bool logOps)
-	{
-		// Cancel pending work
-		(void)BumpToken(casterFormID);
+    void CancelAndReset(
+        RE::ActorHandle caster,
+        std::uint32_t casterFormID,
+        bool logOps,
+        bool resetMorphCaster,
+        bool resetMorphTarget)
+    {
+        (void)BumpToken(casterFormID);
 
-		// Snapshot last target + touched nodes
-		const auto lastTarget = GetLastTarget(casterFormID);
-		auto [casterTouched, targetTouched] = TakeTouchedSets(casterFormID);
+        auto snap = TakeSnapshot(casterFormID);
 
-		// Reset only nodes we touched (scale back to 1.0)
-		if (caster) {
-			for (auto node : casterTouched) {
-				FB::Scaler::SetNodeScale(caster, node, 1.0f, logOps);
-			}
-		}
+        if (caster) {
+            for (auto node : snap.casterScale) {
+                FB::Scaler::SetNodeScale(caster, node, 1.0f, logOps);
+            }
 
-		if (lastTarget) {
-			for (auto node : targetTouched) {
-				FB::Scaler::SetNodeScale(lastTarget, node, 1.0f, logOps);
-			}
-		}
+            if (resetMorphCaster) {
+                FB::Morph::ResetAllForActor(caster, logOps);
+            }
+        }
 
-		if (logOps) {
-			auto c = caster.get();
-			spdlog::info("[FB] Reset: caster='{}' casterNodes={} targetNodes={}",
-				c ? c->GetName() : "<null>",
-				casterTouched.size(),
-				targetTouched.size());
-		}
-	}
+        if (snap.lastTarget) {
+            for (auto node : snap.targetScale) {
+                FB::Scaler::SetNodeScale(snap.lastTarget, node, 1.0f, logOps);
+            }
+
+            if (resetMorphTarget) {
+                FB::Morph::ResetAllForActor(snap.lastTarget, logOps);
+            }
+
+        }
+
+        if (logOps) {
+            auto c = caster.get();
+            spdlog::info("[FB] Reset: caster='{}' casterNodes={} targetNodes={} resetMorphCaster={} resetMorphTarget={}",
+                c ? c->GetName() : "<null>",
+                snap.casterScale.size(),
+                snap.targetScale.size(),
+                resetMorphCaster,
+                resetMorphTarget);
+        }
+    }
 }
