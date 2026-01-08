@@ -189,4 +189,4 @@ This architecture is designed so that:
 
 Any future AI assistant working on this project should preserve these boundaries.
 
-The AI assistant (most likely you, if you are reading this) shall default to providing reports on architecture of new scripts, understandings of crash logs, and other high level descriptions of thought processes to the user before going to the trouble of coding new solutions and ideas. You have been given a set of links to the raw data of each script. Let the user know if these are ever difficult to understand or are not accessible. 
+The AI assistant (most likely you, if you are reading this) shall default to providing high level reports to the user before executing new solutions and ideas. You have been given a set of links to the raw data of each script. Let the user know if these are ever difficult to understand or are not accessible. 
