@@ -1,84 +1,109 @@
-# Full Bodied Animation (FBA)
+=========================
+README
+=========================
 
-Full Bodied Animation is a modern Skyrim AE animation-driven systems mod built around **annotations, behavior graphs, and an SKSE plugin (CommonLibSSE-NG)**. The project’s goal is to allow HKX animation data to drive precise, runtime visual and structural effects in a clean, future-proof way.
+Full Bodied Animation (FBA)
 
-This project explicitly prioritizes:
+Full Bodied Animation is a modern Skyrim AE animation-driven systems mod built around runtime animation context, configuration-driven timelines, and an SKSE plugin implemented using CommonLibSSE-NG.
 
-* Minimal engine and data edits
-* Clear separation of responsibilities
-* Long-term maintainability
-* Architecture-first design
+The core goal is to allow animation context (paired or unpaired) to drive precise, reversible runtime effects such as node scaling, visibility control, and morph application — without fragile hacks or monolithic systems.
 
-Devourment and similar legacy mods are used **only as reference material**. Their approaches are not replicated.
+WHAT THIS MOD IS
 
----
+A framework for animation-driven visual and structural effects
 
-## What This Mod Is
+An SKSE plugin that reacts to animation context and events
 
-* A framework for **animation-driven effects** (scaling, visibility, morphs, state changes)
-* A pipeline from **HKX annotations → behavior graph events → SKSE plugin logic**
-* A paired-animation–capable system, but not limited to paired use cases
+A system that currently uses INI-driven timelines
 
-## What This Mod Is Not
+Designed to support annotation-driven input long-term using the same internal pipeline
 
-* Not a recreation or continuation of Devourment
-* Not a Papyrus-first system
-* Not a behavior injector replacement
-* Not a monolithic or hard-coded animation solution
+Suitable for paired animations, but not limited to them
 
----
+WHAT THIS MOD IS NOT
 
-## High-Level Pipeline
+Not a Papyrus-first system
 
-1. **HKX Annotations**
+Not a behavior injector or replacer
 
-   * Animators annotate clips with semantic, numeric data
-2. **Behavior Graph Routing**
+Not a hard-coded animation solution
 
-   * Annotations are surfaced as real animation events
-3. **SKSE Plugin (CommonLibSSE-NG)**
+Not a monolithic script bundle
 
-   * Events are received and interpreted
-4. **Runtime Effects**
+HIGH-LEVEL PIPELINE
 
-   * NiNode scaling, visibility control, morph application, etc.
+Animation context becomes visible to the game (event, paired state, actor roles)
 
----
+The SKSE plugin receives or resolves the event
 
-## Repository Structure (Relevant)
+Configuration data (INI today, annotations later) is queried
 
-* `src/` – C++ plugin source
-* `docs/architecture.md` – Canonical system design
-* `docs/design_notes.md` – Experiments, rejected ideas, future planning
-* `FBMorphBridge.psc` – Minimal Papyrus bridge (intentionally thin)
-* `FullBodiedIni.ini` – User/config-facing tuning only
+Effects are scheduled and applied to the correct actor and nodes
 
----
+Effects are reverted or reset when the animation context ends
 
-## How to Use This Repository (Humans & GPTs)
+REPOSITORY STRUCTURE (KEY FILES)
 
-If you are a human:
+C++ (SKSE / CommonLibSSE-NG)
 
-* Start with this README
-* Then read `docs/architecture.md`
+src/FullBodiedPlugin.cpp
 
-If you are a GPT or automated assistant:
+src/AnimEventListener.h / .cpp
 
-* Treat `docs/architecture.md` as **canon once marked stable**
-* Treat `docs/design_notes.md` as provisional and exploratory
-* Do not invent new systems without aligning to existing module contracts
+src/AnimationEvents.h / .cpp
 
----
+src/ActorManager.h / .cpp
 
-## Design Philosophy
+src/FBScaler.h / .cpp
 
-* Prefer **correct structure** over quick wins
-* Prefer **SKSE + behavior correctness** over script hacks
-* Prefer **explicit contracts** between systems
-* Systems are **provisional until they work consistently**, then become canon
+src/FBMorph.h / .cpp
 
----
+src/FBConfig.h / .cpp
 
-## Status
+Papyrus
 
-This project is actively evolving. Expect refactors. Expect ideas to be tested and discarded. This is intentional.
+FBMorphBridge.psc
+
+Configuration
+
+FullBodiedIni.ini
+
+Documentation
+
+docs/architecture
+
+docs/design_notes
+
+docs/YourAssignment
+
+HOW TO USE THIS REPOSITORY (HUMANS AND GPTs)
+
+Humans:
+
+Start with this README
+
+Then read docs/architecture
+
+GPTs or automated assistants:
+
+Treat docs/architecture as canonical once systems are marked stable
+
+Treat docs/design_notes as provisional and exploratory
+
+Treat docs/YourAssignment as explicit, temporary instructions that override defaults
+
+Do not invent new systems without aligning to existing module responsibilities
+
+DESIGN PHILOSOPHY
+
+Prefer correct structure over quick wins
+
+Prefer SKSE and behavior correctness over script-heavy solutions
+
+Prefer explicit contracts between systems
+
+Systems are provisional until they behave consistently, then become canon
+
+PROJECT STATUS
+
+This project is actively evolving. Refactors are expected. Experiments are encouraged. Stability is earned, not assumed.
