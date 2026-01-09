@@ -45,6 +45,7 @@ The core goal is to allow animation context (paired or unpaired) to drive precis
 - `src/FBScaler.h / .cpp`
 - `src/FBMorph.h / .cpp`
 - `src/FBConfig.h / .cpp`
+- - `src/PlayerUpdateHook.h / .cpp`
 
 ### Papyrus
 - `FBMorphBridge.psc`
