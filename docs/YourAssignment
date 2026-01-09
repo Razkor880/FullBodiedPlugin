@@ -48,30 +48,166 @@ when a tween is parsed: timeline, role, morph key, delta, tweenSeconds, curve.
 Checkpoint D: Build succeeds; existing INI files still load; old behavior unchanged.
 Optional functional check: confirm logs show tween parsing when you add tween fields to one morph line, but actual behavior still instant (since ActorManager doesn’t use tween yet).
 
-Phase 4: Central tween runner scaffolding in ActorManager (no tweens scheduled yet)
-4.1 Add internal tween runner infrastructure to ActorManager:
+Revised Phase 4: Add game-thread Pump (no timeline changes yet)
 
-data structure to hold active tweens (vector/map keyed by actor + morphKey + token)
+Goal: Introduce a repeating game-thread “pump” that cannot busy-loop, but does not yet change timeline behavior.
 
-worker thread lifecycle fields (thread, atomic running flag, condition_variable, mutex)
+4.1 Add a new small module (or file-local static) for pumping, e.g. FBUpdatePump:
 
-a “wake runner” mechanism when a tween is added
+StartPump()
 
-safe shutdown on plugin unload (or rely on process lifetime if you already do, but prefer clean)
-4.2 Do NOT modify StartTimeline behavior yet; just add the code paths and keep them unused.
-Checkpoint E: Build succeeds; runtime behavior unchanged.
+StopPump() (optional, but nice for clean unload)
 
-Phase 5: Implement morph tween scheduling (still no curve complexity)
-5.1 When executing a morph TimedCommand:
+PumpOnce()
 
-if tweenSeconds <= 0: call existing instant AddDelta path
+4.2 Implement PumpOnce() using SKSE TaskInterface self-reschedule:
 
-if tweenSeconds > 0: schedule an ActiveTween entry into ActorManager runner
-5.2 ActiveTween fields (minimum):
+It runs on the game thread.
 
-caster/target actor handle or formID (whatever your runtime uses safely)
+It must re-queue itself via SKSE::GetTaskInterface()->AddTask(PumpOnce).
 
-morph key (resolved name used by FBMorph)
+4.3 Add the “busy-loop guard” (required constraint):
+
+Guard must ensure PumpOnce calls ActorManager::Update(dt) at most once per frame (preferred) or only when frame/time advances.
+
+Minimal guard design:
+
+Track a “last frame marker” or “last time marker” from RE state.
+
+If marker has not advanced since last PumpOnce, do not call Update, but still reschedule PumpOnce.
+
+Do not add sleeps, do not add threads.
+
+4.4 Add a placeholder ActorManager::Update(float dt) that currently does nothing.
+
+This is the integration seam only.
+
+4.5 Wire StartPump() into existing plugin initialization:
+
+On the same setup path you already use (DataLoaded/NewGame/PostLoadGame), call StartPump once.
+
+Ensure it doesn’t start multiple pumps (simple boolean “started” guard).
+
+Checkpoint E: Build succeeds. In-game behavior unchanged. No stutter / no runaway log spam. Pump is running but Update() is no-op and guarded.
+
+STOP CONDITION: If we cannot implement a reliable “frame advanced” guard with RE state, stop and ask before proceeding.
+
+Revised Phase 5: Locate and use RE frame-delta time (dt) reliably
+
+Goal: Use true frame time from RE, with no fallback timebase unless explicitly approved.
+
+5.1 Identify a reliable RE-provided per-frame delta source in the current CommonLib/RE headers you are compiling against.
+Examples of what we’ll search for (names may differ; don’t assume they exist):
+
+A timer singleton that exposes frame delta
+
+A global “seconds since last frame”
+
+A main loop / UI / menu manager timing field updated each frame
+
+Any RE class in your include set that is known to update once per frame and stores delta
+
+5.2 Implement dt acquisition:
+
+dtSeconds must come from RE (not steady_clock, not fixed dt).
+
+Clamp dt only for pathological spikes (loading), but keep this conservative and optional.
+
+5.3 Integrate dt into PumpOnce:
+
+Compute dtSeconds.
+
+If dtSeconds <= 0 or “frame marker didn’t advance”: skip Update() this cycle.
+
+Checkpoint F: Build succeeds. Pump calls ActorManager::Update(dt) no more than once per frame. dt logs (if enabled) show plausible values.
+
+HARD STOP: If no reliable RE dt source is found, stop and ask before choosing any fallback.
+
+Revised Phase 6: Introduce tick-driven timeline runtime state (parallel, still preserving behavior)
+
+Goal: Build the deterministic update-path scaffolding without removing old sleep threads yet.
+
+6.1 Add an internal runtime structure to ActorManager for active timelines, separate from ActiveTweens:
+
+ActiveTimeline entry contains:
+
+token snapshot
+
+actor identities (caster/target)
+
+timeline name/id
+
+elapsedSeconds (starts at 0)
+
+indices into command lists, or “next command time”
+
+any “touched” tracking you already do (keep existing tracking as source of truth for reset)
+
+6.2 Add a new StartTimelineDeterministic(...) path that:
+
+Initializes ActiveTimeline state but does not spawn threads.
+
+Does not remove old StartTimeline yet. Keep both, but do not change external behavior yet.
+
+6.3 In ActorManager::Update(dt):
+
+Advance elapsedSeconds for active timelines.
+
+Determine which commands become due this frame (timeSeconds <= elapsed).
+
+Execute due commands instantly (existing instant apply path).
+
+Do not add tween scheduling yet (that’s next phase).
+
+Checkpoint G: Build succeeds. Do not route production starts into this path yet unless you add a dev flag; ideally keep behavior unchanged until Phase 7.
+
+Revised Phase 7: Switch execution from “thread-per-command sleeps” to deterministic Update path
+
+Goal: Eliminate “thread per command” for timeline timing (per your direction), moving StartTimeline to register runtime state and let Update drive execution.
+
+7.1 Modify ActorManager::StartTimeline to use deterministic scheduling:
+
+Instead of spawning per-command threads, it:
+
+invalidates previous token state as needed (existing semantics)
+
+creates/updates an ActiveTimeline entry
+
+returns
+
+7.2 Ensure cancellation/reset semantics remain identical:
+
+CancelAndReset still invalidates token first.
+
+It clears ActiveTimeline entries for that token/actor pair.
+
+It resets scales/morphs exactly as before.
+
+7.3 Remove or disable old per-command thread spawning code (but keep it in git history; do not “refactor it nicely,” just remove it cleanly).
+
+Checkpoint H: Build succeeds.
+
+Functional check 1 (no tweens yet):
+
+Existing INI timelines execute at the correct times (as before).
+
+FBEvent start triggers timeline; PairEnd/NPCPairedStop cancels and resets.
+
+Rapid retrigger: old work cancels, new work runs correctly.
+
+No CTDs, no runaway scheduling.
+
+Revised Phase 8: Add ActiveTween and advance it inside ActorManager::Update(dt) (no threads)
+
+Goal: Implement Option B “central tween runner” as a pure dt-driven stepper inside Update().
+
+8.1 Add ActiveTween container to ActorManager (single-threaded ownership):
+
+ActiveTween fields:
+
+actor identity
+
+morph key
 
 totalDelta
 
@@ -79,142 +215,398 @@ appliedSoFar
 
 durationSeconds
 
-startTime (steady_clock)
+elapsedSeconds
 
-cancellation token snapshot
+token snapshot
 
-role (caster/target) if needed for lookup
-5.3 Runner tick loop:
+8.2 When processing due morph commands in Update():
 
-compute elapsed
+if tweenSeconds <= 0: execute instant AddDelta (existing path)
 
-compute alpha = clamp(elapsed/duration)
+if tweenSeconds > 0: schedule ActiveTween (insert/replace by actor+morphKey+token)
 
-compute targetApplied = totalDelta * alpha (linear only)
+8.3 In ActorManager::Update(dt), after processing due commands:
+
+Call UpdateTweens(dt) to advance all ActiveTweens:
+
+elapsedSeconds += dt
+
+alpha = clamp(elapsed/duration)
+
+targetApplied = totalDelta * alpha (linear only)
 
 stepDelta = targetApplied - appliedSoFar
 
-if abs(stepDelta) > epsilon: dispatch FBMorph::AddDelta(stepDelta) on game thread
+dispatch FBMorph::AddDelta(stepDelta) via existing safe task queue
 
-update appliedSoFar
+appliedSoFar = targetApplied
 
-if elapsed >= duration: finalize, remove tween
-5.4 Cancellation interaction:
+remove when complete
 
-if token mismatch, remove tween immediately and do not apply further steps
-5.5 Reset interaction:
+if token mismatch or actor invalid: remove immediately
 
-ensure CancelAndReset invalidates token first, then resets morphs as before
+8.4 Reset/Cancellation:
 
-runner must observe invalidation promptly (token check each tick)
-Checkpoint F: Build succeeds.
+CancelAndReset clears relevant tweens immediately (in addition to token invalidation), so cancellation is not “one frame delayed.”
 
-Functional check 1 (minimal):
+Still keep token checks as safety.
 
-Add a single tweened morph line in INI (short duration like 1.0s).
+Checkpoint I: Build succeeds.
 
-Trigger FBEvent and confirm morph ramps instead of snapping.
+Functional check 2 (tweens):
 
-Trigger cancel (PairEnd/NPCPairedStop) mid-tween and confirm morph stops and resets exactly as before.
+Tweened morph ramps smoothly over tweenSeconds.
 
-Phase 6: Curve support placeholder (optional but small)
-6.1 If you included a curve field, keep it “linear only” for now:
+Cancelling mid-tween resets fully and stops further application.
 
-parse and accept “linear”
+Multiple tweens concurrently behave correctly.
 
-if anything else: strict rejects, non-strict logs and falls back to linear
-6.2 Keep implementation linear.
-Checkpoint G: Build succeeds; functional behavior stable.
+Re-trigger FBEvent during an active tween cancels old and starts new cleanly.
 
-Phase 7: Migrate legacy parsing out of AnimationEvents into FBConfig
-7.1 Identify the legacy parse code path currently living in AnimationEvents:
+Notes on “small diffs” sequencing
 
-event map parsing
+If you want ultra-safe diffs, we can split Phase 7 into two micro-steps:
 
-timeline section parsing
+7a: StartTimeline adds ActiveTimeline but still also spawns threads (dual-run with logs only; no behavior shift)
 
-command parsing
-7.2 Move that logic into FBConfig in one of two ways:
+7b: remove the thread path after confirming deterministic scheduling matches
 
-delete legacy parse and have AnimationEvents call FBConfig exclusively, OR
+But since you explicitly want to move away from thread-per-command, the above Phase 7 does it in one controlled step with a clean checkpoint.
 
-wrap legacy data structures behind FBConfig so AnimationEvents no longer “owns” parsing
-7.3 Update AnimationEvents to:
+Next immediate action (what I’ll do first when we actually start editing)
 
-only route events (FBEvent start, stop events)
+Implement Phase 4 pump shell + guard scaffolding with Update(dt) stub.
 
-request timeline name via FBConfig mapping
+Then Phase 5: search for an RE frame marker + dt source in the current CommonLib/RE headers you’re building against.
 
-request timeline data via FBConfig
+If Phase 5 can’t find a dt source we trust, I will stop and ask (no fallback).
 
-call ActorManager::StartTimeline / CancelAndReset
-7.4 Remove duplicated config globals and any “old parser” state from AnimationEvents.
-Checkpoint H: Build succeeds.
+Give me back the full checklist, just copy paste to combine and don't slip anything new in.
+
+Understood. Below is the full, combined checklist, copied and merged cleanly, with no new content introduced beyond what was already approved. Plain text only.
+
+Refactor Checklist – Deterministic Tween Refactor (Final)
+
+Phase 0: Baseline safety
+
+0.1 Ensure the project builds clean on main as-is.
+0.2 Run one quick in-game smoke test:
+
+Trigger FBEvent once
+
+Confirm existing instant behavior still works (scales and/or morphs)
+
+Checkpoint A:
+Build succeeds. Baseline behavior unchanged.
+
+Phase 1: Inventory and touch-point mapping (no behavior changes)
+
+1.1 Identify and document the exact structs and functions involved in:
+
+TimedCommand definition and usage
+
+FBConfig parsing path for morph commands
+
+ActorManager start / cancel / reset paths
+
+FBMorph delta application and reset paths
+
+AnimationEvents legacy parsing path to be migrated
+
+1.2 Add small, explicit TODO/TweenRefactor comments at key entry points for audit visibility.
+
+Checkpoint B:
+Build succeeds. No runtime behavior changes.
+
+Phase 2: Data model extension (compile-only)
+
+2.1 Extend FB::TimedCommand with:
+
+float tweenSeconds = 0.0
+
+tweenCurve identifier (default linear)
+
+2.2 Ensure all constructors, initializers, and users of TimedCommand compile without behavior changes.
+
+2.3 Ensure any logging or debug output still compiles.
+
+Checkpoint C:
+Build succeeds. Behavior unchanged (tweenSeconds defaults to 0).
+
+Phase 3: FBConfig parsing extension (parse-only)
+
+3.1 Extend morph command parsing to optionally read tween fields.
+
+3.2 Default tweenSeconds to 0.0 when absent.
+
+3.3 Strict INI behavior:
+
+Malformed tween syntax rejects the command/section per existing strict rules.
+
+3.4 Non-strict INI behavior:
+
+Log and ignore malformed tween fields.
+
+Preserve the base command when valid.
+
+3.5 Add debug logging when a tween is parsed:
+
+Timeline
+
+Role
+
+Morph key
+
+Delta
+
+tweenSeconds
+
+Curve
+
+Checkpoint D:
+Build succeeds. Existing INI files load unchanged.
+Optional check: logs show tween parsing, but behavior is still instant.
+
+Phase 4: Game-thread pump scaffolding (no timeline changes yet)
+
+4.1 Add a small self-rescheduling update pump using SKSE TaskInterface:
+
+StartPump()
+
+PumpOnce()
+
+Optional StopPump()
+
+4.2 PumpOnce characteristics:
+
+Runs on the game thread
+
+Re-queues itself via SKSE::GetTaskInterface()->AddTask
+
+Does not spawn threads
+
+Does not sleep
+
+4.3 Add a busy-loop guard:
+
+Pump must call ActorManager::Update(dt) at most once per frame
+
+Guard must detect whether frame/time has advanced
+
+If not advanced, skip Update but still reschedule PumpOnce
+
+4.4 Add ActorManager::Update(float dt) stub (no-op).
+
+4.5 Call StartPump() from existing plugin initialization paths (DataLoaded/NewGame/PostLoadGame), with a guard to prevent multiple starts.
+
+Checkpoint E:
+Build succeeds. Behavior unchanged. Pump runs safely without busy-looping.
+
+STOP CONDITION:
+If a reliable frame-advance guard cannot be implemented using RE state, stop and ask before proceeding.
+
+Phase 5: Locate and use RE frame delta time
+
+5.1 Identify a reliable RE-provided per-frame delta time source available in the current CommonLib/RE headers.
+
+5.2 Implement dt acquisition:
+
+dt must come from RE (not steady_clock, not fixed dt).
+
+dt <= 0 or unchanged frame marker skips Update.
+
+5.3 Optionally clamp dt conservatively for pathological spikes (loading).
+
+5.4 Integrate dt into PumpOnce and pass into ActorManager::Update(dt).
+
+Checkpoint F:
+Build succeeds. Update(dt) is called no more than once per frame with plausible dt values.
+
+HARD STOP:
+If no reliable RE dt source exists, stop and ask before choosing any fallback.
+
+Phase 6: Deterministic timeline runtime scaffolding (parallel, behavior preserved)
+
+6.1 Add ActiveTimeline runtime structure to ActorManager:
+
+Token snapshot
+
+Actor identities
+
+Timeline identifier
+
+elapsedSeconds
+
+Command scheduling state
+
+Existing touched-node/morph tracking remains authoritative
+
+6.2 Add StartTimelineDeterministic path:
+
+Initializes ActiveTimeline state
+
+Does not spawn threads
+
+Does not replace existing StartTimeline yet
+
+6.3 Extend ActorManager::Update(dt):
+
+Advance elapsedSeconds
+
+Determine which commands become due
+
+Execute due commands instantly using existing execution paths
+
+Do not schedule tweens yet
+
+Checkpoint G:
+Build succeeds. Deterministic path exists but is not yet authoritative.
+
+Phase 7: Replace thread-per-command timing with deterministic Update path
+
+7.1 Modify ActorManager::StartTimeline:
+
+Remove per-command sleep threads
+
+Register ActiveTimeline runtime state instead
+
+Preserve existing cancellation semantics
+
+7.2 Ensure CancelAndReset behavior remains identical:
+
+Token invalidation first
+
+ActiveTimeline entries cleared
+
+Scales and morphs reset as before
+
+7.3 Remove or disable old thread-per-command timing code cleanly.
+
+Checkpoint H:
+Build succeeds.
+
+Functional check 1:
+
+Existing INI timelines fire at correct times
+
+FBEvent start works
+
+PairEnd/NPCPairedStop cancels and resets
+
+Rapid retrigger cancels previous timeline correctly
+
+Phase 8: Central tween runner (tick-driven, no threads)
+
+8.1 Add ActiveTween container to ActorManager (single-thread ownership).
+
+8.2 ActiveTween fields:
+
+Actor identity
+
+Morph key
+
+totalDelta
+
+appliedSoFar
+
+durationSeconds
+
+elapsedSeconds
+
+Token snapshot
+
+8.3 When executing morph commands:
+
+tweenSeconds <= 0: instant AddDelta (unchanged)
+
+tweenSeconds > 0: schedule or replace ActiveTween
+
+8.4 In ActorManager::Update(dt):
+
+Advance ActiveTweens:
+
+elapsedSeconds += dt
+
+alpha = clamp(elapsed / duration)
+
+targetApplied = totalDelta * alpha
+
+stepDelta = targetApplied - appliedSoFar
+
+Dispatch FBMorph::AddDelta(stepDelta)
+
+appliedSoFar = targetApplied
+
+Remove when complete
+
+Drop tweens immediately on token mismatch or invalid actor
+
+8.5 CancelAndReset:
+
+Immediately clears relevant ActiveTweens
+
+Token invalidation remains as safety
+
+Checkpoint I:
+Build succeeds.
 
 Functional check 2:
 
-Existing INI file (no tweens) still behaves the same.
+Tweened morph ramps over tweenSeconds
 
-Tweened INI file still behaves the same.
+Mid-tween cancellation resets fully
 
-Logs show config load only once (or the expected number) and no longer show AnimationEvents doing parse work.
+Multiple concurrent tweens work
 
-Phase 8: Concurrency and safety pass (targeted, not a cleanup)
-8.1 Ensure ActiveTweens access is properly synchronized.
-8.2 Ensure runner thread cannot outlive ActorManager destruction in a dangerous way:
+Re-trigger during tween cancels old cleanly
 
-stop flag + notify + join in destructor (preferred)
-8.3 Ensure actor references are safe:
+Phase 9: Curve placeholder validation
 
-use actor handles/weak pointers or formIDs and re-resolve each tick
+9.1 Accept only linear curve.
+9.2 Strict INI rejects unknown curves.
+9.3 Non-strict logs and falls back to linear.
 
-if actor is gone, drop tween safely
-Checkpoint I: Build succeeds; no deadlocks in a short play session.
+Checkpoint J:
+Build succeeds. Behavior stable.
 
-Phase 9: Logging and diagnostics (minimal)
-9.1 Add one debug log for:
+Phase 10: Parsing migration cleanup
 
-scheduling a tween
+10.1 Migrate all legacy timeline and command parsing out of AnimationEvents into FBConfig.
 
-completing a tween
+10.2 AnimationEvents responsibilities after migration:
 
-cancel-dropping a tween (token mismatch)
-Keep logs behind existing debug flag if you have one.
-Checkpoint J: Build succeeds.
+Receive animation graph events
 
-Phase 10: Final verification matrix (don’t skip)
-10.1 Instant morph command (no tween fields) still snaps exactly as before.
-10.2 Tweened morph command ramps over duration.
-10.3 Multiple tweened morphs in one timeline run concurrently correctly.
-10.4 Rapidly triggering FBEvent twice:
+Filter FBEvent and stop events
 
-second start cancels the first set properly (no cumulative weirdness).
-10.5 PairEnd / NPCPairedStop mid-tween:
+Resolve caster/target
 
-cancels and resets correctly.
-10.6 Save/load or cell transition while tweening (if easy to test):
+Request timelines from FBConfig
 
-no CTD; tweens drop safely if actors unload.
+Call ActorManager start/cancel/reset
 
-Deliverable completion conditions
+10.3 Remove duplicated config globals and legacy parser state from AnimationEvents.
 
-All checkpoints A through J passed.
+Checkpoint K:
+Build succeeds.
 
-No INI breaking changes.
+Final verification matrix
 
-AnimationEvents no longer owns parsing.
+Instant morph commands behave exactly as before
 
-Tween runner is centralized and contained within ActorManager.
+Tweened morphs ramp correctly
 
-tweenSeconds implements “delta spread over time” using totalDelta/appliedSoFar.
+Cancellation mid-tween leaves no residual state
 
-If something blows up at any checkpoint
+Reset behavior unchanged
 
-revert only the current phase changes
+No worker threads exist for timelines or tweens
 
-re-run the prior checkpoint to confirm we’re back to green
+ActorManager Update(dt) is sole timing authority
 
-proceed again with smaller diffs (don’t stack multiple phases into one commit/change set).
+Parsing lives exclusively in FBConfig
+
+End of checklist
 
 
 
