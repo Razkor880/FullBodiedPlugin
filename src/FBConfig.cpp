@@ -577,6 +577,12 @@ namespace
 				else if (IEquals(key, "resetMorphsOnPairedStop")) {
 					newCfg.resetMorphsOnPairedStop = ParseBool(val, newCfg.resetMorphsOnPairedStop);
 				}
+				else if (IEquals(key, "resetScalesOnPairEnd")) {
+					newCfg.resetScalesOnPairEnd = ParseBool(val, newCfg.resetScalesOnPairEnd);
+				}
+				else if (IEquals(key, "resetScalesOnPairedStop")) {
+					newCfg.resetScalesOnPairedStop = ParseBool(val, newCfg.resetScalesOnPairedStop);
+				}
 				return;
 			}
 

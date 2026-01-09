@@ -33,10 +33,14 @@ namespace FB::Config
 		// Scale/visibility/etc reset behavior (existing)
 		bool resetOnPairEnd{ true };
 		bool resetOnPairedStop{ true };
+		bool resetScalesOnPairEnd{ true };
+		bool resetScalesOnPairedStop{ true };
 
 		// NEW: Morph reset behavior (RaceMenu/NiOverride key cleanup)
 		bool resetMorphsOnPairEnd{ true };
 		bool resetMorphsOnPairedStop{ true };  // optional but recommended for parity
+
+		
 
 		DebugConfig dbg{};
 

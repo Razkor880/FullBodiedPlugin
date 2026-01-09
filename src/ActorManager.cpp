@@ -1,16 +1,19 @@
 #include "ActorManager.h"
 
 #include "FBScaler.h"
-#include "FBMorph.h"      // <-- add this
+#include "FBMorph.h"
 
 #include <spdlog/spdlog.h>
 
-#include <chrono>
+#include <algorithm>
 #include <mutex>
-#include <thread>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
+#include <cassert>
+
 
 namespace
 {
@@ -115,6 +118,142 @@ namespace
 
         return out;
     }
+
+    // ------------------------------------------------------------
+    // TODO(TweenRefactor): Phase 6/7 - deterministic timeline runtime
+    // ------------------------------------------------------------
+    struct ActiveTimeline
+    {
+        RE::ActorHandle caster;
+        RE::ActorHandle target;
+        std::uint32_t casterFormID{ 0 };
+        std::uint64_t token{ 0 };
+
+        bool logOps{ false };
+
+        float elapsedSeconds{ 0.0f };
+        std::size_t nextIndex{ 0 };
+        std::vector<FB::TimedCommand> commands;
+    };
+
+    // Keyed by casterFormID (matches existing token + reset ownership model)
+    static std::unordered_map<std::uint32_t, ActiveTimeline> g_activeTimelines;
+
+    // ------------------------------------------------------------
+    // TODO(TweenRefactor): Phase 8 - active morph tweens
+    // One tween per (actor, morph key); scheduling replaces existing.
+    // ------------------------------------------------------------
+    struct TweenKey
+    {
+        std::uint32_t actorFormID{ 0 };
+        std::string morphName;
+
+        bool operator==(const TweenKey& o) const noexcept
+        {
+            return actorFormID == o.actorFormID && morphName == o.morphName;
+        }
+    };
+
+    struct TweenKeyHash
+    {
+        std::size_t operator()(const TweenKey& k) const noexcept
+        {
+            std::size_t h1 = std::hash<std::uint32_t>{}(k.actorFormID);
+            std::size_t h2 = std::hash<std::string>{}(k.morphName);
+            return h1 ^ (h2 + 0x9e3779b97f4a7c15ull + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
+    struct ActiveTween
+    {
+        RE::ActorHandle actor;
+        std::uint32_t actorFormID{ 0 };
+
+        // Ownership for reset/token validity
+        std::uint32_t casterFormID{ 0 };
+        std::uint64_t token{ 0 };
+        FB::TargetKind who{ FB::TargetKind::kCaster };
+
+        std::string morphName;
+        float totalDelta{ 0.0f };
+        float appliedSoFar{ 0.0f };
+
+        float durationSeconds{ 0.0f };
+        float elapsedSeconds{ 0.0f };
+
+        bool touchedMarked{ false };
+    };
+
+    static std::unordered_map<TweenKey, ActiveTween, TweenKeyHash> g_activeTweens;
+
+    static RE::ActorHandle ResolveActor(const ActiveTimeline& tl, FB::TargetKind who)
+    {
+        return (who == FB::TargetKind::kCaster) ? tl.caster : tl.target;
+    }
+
+    static void ExecuteScale(std::uint32_t casterFormID, RE::ActorHandle actor, const FB::TimedCommand& cmd, bool logOps)
+    {
+        if (!actor) {
+            return;
+        }
+        FB::Scaler::SetNodeScale(actor, cmd.nodeKey, cmd.scale, logOps);
+        MarkTouchedScale(casterFormID, cmd.target, cmd.nodeKey);
+    }
+
+    static void ExecuteMorphInstant(std::uint32_t casterFormID, RE::ActorHandle actor, const FB::TimedCommand& cmd, bool logOps)
+    {
+        if (!actor) {
+            return;
+        }
+        FB::Morph::AddDelta(actor, cmd.morphName, cmd.delta, logOps);
+        MarkTouchedMorph(casterFormID, cmd.target);
+    }
+
+    static void ScheduleMorphTween(const ActiveTimeline& tl, const FB::TimedCommand& cmd)
+    {
+        RE::ActorHandle actor = ResolveActor(tl, cmd.target);
+        if (!actor) {
+            return;
+        }
+
+        auto a = actor.get();  // NiPointer<RE::Actor>
+        if (!a) {
+            return;
+        }
+
+
+        ActiveTween tw;
+        tw.actor = actor;
+        tw.actorFormID = a->GetFormID();
+
+        tw.casterFormID = tl.casterFormID;
+        tw.token = tl.token;
+        tw.who = cmd.target;
+
+        tw.morphName = cmd.morphName;
+        tw.totalDelta = cmd.delta;
+        tw.appliedSoFar = 0.0f;
+
+        tw.durationSeconds = cmd.tweenSeconds;
+        tw.elapsedSeconds = 0.0f;
+
+        TweenKey key{ tw.actorFormID, tw.morphName };
+
+        // Replacement rule: one tween per (actor, morph key)
+        g_activeTweens[key] = std::move(tw);
+    }
+
+    static void ClearTweensForCaster(std::uint32_t casterFormID)
+    {
+        for (auto it = g_activeTweens.begin(); it != g_activeTweens.end(); ) {
+            if (it->second.casterFormID == casterFormID) {
+                it = g_activeTweens.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+    }
 }
 
 namespace FB::ActorManager
@@ -130,39 +269,155 @@ namespace FB::ActorManager
             return;
         }
 
+        // TODO(TweenRefactor): Phase 7 - remove thread-per-command timing; register deterministic runtime state
         const auto token = BumpToken(casterFormID);
         SetLastTarget(casterFormID, target);
 
-        for (const auto& cmd : commands) {
-            std::thread([caster, target, casterFormID, token, cmd, logOps]() mutable {
-                if (cmd.timeSeconds > 0.0f) {
-                    std::this_thread::sleep_for(std::chrono::duration<float>(cmd.timeSeconds));
-                }
+        ActiveTimeline tl;
+        tl.caster = caster;
+        tl.target = target;
+        tl.casterFormID = casterFormID;
+        tl.token = token;
+        tl.logOps = logOps;
+        tl.elapsedSeconds = 0.0f;
+        tl.nextIndex = 0;
+        tl.commands = std::move(commands);
 
-                if (!IsTokenCurrent(casterFormID, token)) {
-                    return;
-                }
-
-                const auto actorHandle = (cmd.target == FB::TargetKind::kCaster) ? caster : target;
-                if (!actorHandle) {
-                    return;
-                }
-
-                if (cmd.kind == FB::CommandKind::kScale) {
-                    FB::Scaler::SetNodeScale(actorHandle, cmd.nodeKey, cmd.scale, logOps);
-                    MarkTouchedScale(casterFormID, cmd.target, cmd.nodeKey);
-                }
-                else if (cmd.kind == FB::CommandKind::kMorph) {
-                    FB::Morph::AddDelta(actorHandle, cmd.morphName, cmd.delta, logOps);
-                    MarkTouchedMorph(casterFormID, cmd.target);
-                }
-                }).detach();
-        }
+        g_activeTimelines[casterFormID] = std::move(tl);
     }
 
-    void FB::ActorManager::Update(float /*dtSeconds*/)
+    void Update(float dtSeconds)
     {
-        // Phase 4/5: intentionally empty (no behavior change yet)
+        // TODO(TweenRefactor): Phase 6/7/8 - deterministic tick entry point (called from PlayerCharacter::Update hook)
+
+        // Required safety: skip dt <= 0
+        if (dtSeconds <= 0.0f) {
+            return;
+        }
+
+        // Required safety: clamp pathological dt spikes (loading/hitch/pause)
+        constexpr float kMaxDtSeconds = 0.25f;
+        if (dtSeconds > kMaxDtSeconds) {
+            dtSeconds = kMaxDtSeconds;
+        }
+
+        // 1) Advance deterministic timelines
+        for (auto it = g_activeTimelines.begin(); it != g_activeTimelines.end(); ) {
+            ActiveTimeline& tl = it->second;
+
+            // Token validity must be checked before executing any work
+            if (!IsTokenCurrent(tl.casterFormID, tl.token)) {
+                it = g_activeTimelines.erase(it);
+                continue;
+            }
+
+            tl.elapsedSeconds += dtSeconds;
+
+            // Execute all due commands in correct order
+            while (tl.nextIndex < tl.commands.size()) {
+                const auto& cmd = tl.commands[tl.nextIndex];
+                if (cmd.timeSeconds > tl.elapsedSeconds) {
+                    break;
+                }
+
+                // Resolve target actor for this command
+                const auto actorHandle = ResolveActor(tl, cmd.target);
+                if (cmd.kind == FB::CommandKind::kScale) {
+                    ExecuteScale(tl.casterFormID, actorHandle, cmd, tl.logOps);
+                }
+                else if (cmd.kind == FB::CommandKind::kMorph) {
+
+                    // TODO(TweenRefactor Phase 9): runtime currently supports LINEAR tween curves only.
+                    // Parser is expected to enforce this, but we defensively guard here.
+#ifndef NDEBUG
+                    assert(cmd.tweenCurve == FB::TweenCurve::kLinear);
+#endif
+
+                    if (cmd.tweenCurve != FB::TweenCurve::kLinear) {
+                        // Should never happen unless parser rules are bypassed or future changes forget to update runtime.
+                        if (tl.logOps) {
+                            spdlog::warn(
+                                "[FB] Non-linear tween curve reached runtime (forcing linear). morph='{}'",
+                                cmd.morphName);
+                        }
+
+                    }
+
+                    // If tweenSeconds > 0, schedule a tween instead of instant apply
+                    if (cmd.tweenSeconds > 0.0f) {
+                        ScheduleMorphTween(tl, cmd);
+                    }
+                    else {
+                        ExecuteMorphInstant(tl.casterFormID, actorHandle, cmd, tl.logOps);
+                    }
+                }
+
+
+                ++tl.nextIndex;
+            }
+
+            // Done
+            if (tl.nextIndex >= tl.commands.size()) {
+                it = g_activeTimelines.erase(it);
+                continue;
+            }
+
+            ++it;
+        }
+
+        // 2) Advance active tweens (after timeline scheduling)
+        for (auto it = g_activeTweens.begin(); it != g_activeTweens.end(); ) {
+            ActiveTween& tw = it->second;
+
+            // Token validity must be checked before applying any morph delta
+            if (!IsTokenCurrent(tw.casterFormID, tw.token)) {
+                it = g_activeTweens.erase(it);
+                continue;
+            }
+
+            if (!tw.actor) {
+                it = g_activeTweens.erase(it);
+                continue;
+            }
+
+            auto a = tw.actor.get();  // NiPointer<RE::Actor>
+            if (!a) {
+                it = g_activeTweens.erase(it);
+                continue;
+            }
+
+
+            // Protect against bad durations
+            if (tw.durationSeconds <= 0.0f) {
+                it = g_activeTweens.erase(it);
+                continue;
+            }
+
+            tw.elapsedSeconds += dtSeconds;
+
+            const float alpha = std::clamp(tw.elapsedSeconds / tw.durationSeconds, 0.0f, 1.0f);
+            const float targetApplied = tw.totalDelta * alpha;
+            const float stepDelta = targetApplied - tw.appliedSoFar;
+
+            if (stepDelta != 0.0f) {
+                FB::Morph::AddDelta(tw.actor, tw.morphName, stepDelta, false);
+
+                // Mark touched morph only once we actually apply something
+                if (!tw.touchedMarked) {
+                    MarkTouchedMorph(tw.casterFormID, tw.who);
+                    tw.touchedMarked = true;
+                }
+
+                tw.appliedSoFar = targetApplied;
+            }
+
+            if (alpha >= 1.0f) {
+                it = g_activeTweens.erase(it);
+                continue;
+            }
+
+            ++it;
+        }
     }
 
     void CancelAndReset(
@@ -176,35 +431,33 @@ namespace FB::ActorManager
 
         auto snap = TakeSnapshot(casterFormID);
 
+        // NEW: baseline-based scale reset (both participants)
         if (caster) {
-            for (auto node : snap.casterScale) {
-                FB::Scaler::SetNodeScale(caster, node, 1.0f, logOps);
-            }
-
-            if (resetMorphCaster) {
-                FB::Morph::ResetAllForActor(caster, logOps);
-            }
+            FB::Scaler::ResetActor(caster, logOps);
         }
 
         if (snap.lastTarget) {
-            for (auto node : snap.targetScale) {
-                FB::Scaler::SetNodeScale(snap.lastTarget, node, 1.0f, logOps);
-            }
+            FB::Scaler::ResetActor(snap.lastTarget, logOps);
+        }
 
-            if (resetMorphTarget) {
-                FB::Morph::ResetAllForActor(snap.lastTarget, logOps);
-            }
+        // Existing morph resets remain authoritative
+        if (caster && resetMorphCaster) {
+            FB::Morph::ResetAllForActor(caster, logOps);
+        }
 
+        if (snap.lastTarget && resetMorphTarget) {
+            FB::Morph::ResetAllForActor(snap.lastTarget, logOps);
         }
 
         if (logOps) {
-            auto c = caster.get();
-            spdlog::info("[FB] Reset: caster='{}' casterNodes={} targetNodes={} resetMorphCaster={} resetMorphTarget={}",
+            auto c = caster.get();          // NiPointer<RE::Actor>
+            auto t = snap.lastTarget.get(); // NiPointer<RE::Actor>
+            spdlog::info("[FB] Reset(Scale+Morph): caster='{}' target='{}' resetMorphCaster={} resetMorphTarget={}",
                 c ? c->GetName() : "<null>",
-                snap.casterScale.size(),
-                snap.targetScale.size(),
+                t ? t->GetName() : "<null>",
                 resetMorphCaster,
                 resetMorphTarget);
         }
     }
+
 }
