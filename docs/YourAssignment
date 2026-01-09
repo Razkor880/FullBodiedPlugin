@@ -1,5 +1,228 @@
 YourAssignment – Tween Refactor (Revised Canon for Executor)
 
+
+Refactor Checklist (Option B central tween runner, migrate parsing into FBConfig)
+
+Phase 0: Baseline safety
+0.1 Make sure the project builds clean on main as-is.
+0.2 Run one quick in-game smoke test: trigger FBEvent once and confirm the old instant behavior still works (scales and/or morphs if you have them configured).
+Checkpoint A: Build succeeds and baseline behavior unchanged.
+
+Phase 1: Inventory and “touch points” map (no behavior changes)
+1.1 Identify and list (in code comments or notes) the exact structs and functions involved in:
+
+TimedCommand definition and usage
+
+FBConfig parse path for morph commands
+
+ActorManager start/cancel/reset paths
+
+FBMorph delta application and reset paths
+
+AnimationEvents legacy parsing path to be migrated
+1.2 Add a small “TODO/TweenRefactor” comment banner at the key entry points so it’s easy to audit.
+Checkpoint B: No code behavior changed; build still succeeds.
+
+Phase 2: Data model extension (compile-only change, no runtime behavior change)
+2.1 Extend FB::TimedCommand (or the morph command subtype if you have one) with:
+
+float tweenSeconds = 0.0f
+
+curve identifier (start with an enum Linear only, or string “linear” stored but defaulted)
+2.2 Ensure all constructors/initializers compile and any places that create TimedCommand still compile without modifying behavior.
+2.3 Ensure serialization/logging (if any) still compiles.
+Checkpoint C: Build succeeds; game behavior unchanged (tweenSeconds defaults 0).
+
+Phase 3: FBConfig parsing extension (parse-only, still executes instantly)
+3.1 Extend morph command parse to optionally parse tween fields without breaking old syntax.
+3.2 Default tweenSeconds to 0.0 when absent.
+3.3 StrictIni behavior:
+
+malformed tween syntax rejects the line (or the section) exactly per your existing strict policy style.
+Non-strict behavior:
+
+logs and ignores tween fields, still keeps the base command if valid.
+3.4 Add targeted debug log lines:
+
+when a tween is parsed: timeline, role, morph key, delta, tweenSeconds, curve.
+Checkpoint D: Build succeeds; existing INI files still load; old behavior unchanged.
+Optional functional check: confirm logs show tween parsing when you add tween fields to one morph line, but actual behavior still instant (since ActorManager doesn’t use tween yet).
+
+Phase 4: Central tween runner scaffolding in ActorManager (no tweens scheduled yet)
+4.1 Add internal tween runner infrastructure to ActorManager:
+
+data structure to hold active tweens (vector/map keyed by actor + morphKey + token)
+
+worker thread lifecycle fields (thread, atomic running flag, condition_variable, mutex)
+
+a “wake runner” mechanism when a tween is added
+
+safe shutdown on plugin unload (or rely on process lifetime if you already do, but prefer clean)
+4.2 Do NOT modify StartTimeline behavior yet; just add the code paths and keep them unused.
+Checkpoint E: Build succeeds; runtime behavior unchanged.
+
+Phase 5: Implement morph tween scheduling (still no curve complexity)
+5.1 When executing a morph TimedCommand:
+
+if tweenSeconds <= 0: call existing instant AddDelta path
+
+if tweenSeconds > 0: schedule an ActiveTween entry into ActorManager runner
+5.2 ActiveTween fields (minimum):
+
+caster/target actor handle or formID (whatever your runtime uses safely)
+
+morph key (resolved name used by FBMorph)
+
+totalDelta
+
+appliedSoFar
+
+durationSeconds
+
+startTime (steady_clock)
+
+cancellation token snapshot
+
+role (caster/target) if needed for lookup
+5.3 Runner tick loop:
+
+compute elapsed
+
+compute alpha = clamp(elapsed/duration)
+
+compute targetApplied = totalDelta * alpha (linear only)
+
+stepDelta = targetApplied - appliedSoFar
+
+if abs(stepDelta) > epsilon: dispatch FBMorph::AddDelta(stepDelta) on game thread
+
+update appliedSoFar
+
+if elapsed >= duration: finalize, remove tween
+5.4 Cancellation interaction:
+
+if token mismatch, remove tween immediately and do not apply further steps
+5.5 Reset interaction:
+
+ensure CancelAndReset invalidates token first, then resets morphs as before
+
+runner must observe invalidation promptly (token check each tick)
+Checkpoint F: Build succeeds.
+
+Functional check 1 (minimal):
+
+Add a single tweened morph line in INI (short duration like 1.0s).
+
+Trigger FBEvent and confirm morph ramps instead of snapping.
+
+Trigger cancel (PairEnd/NPCPairedStop) mid-tween and confirm morph stops and resets exactly as before.
+
+Phase 6: Curve support placeholder (optional but small)
+6.1 If you included a curve field, keep it “linear only” for now:
+
+parse and accept “linear”
+
+if anything else: strict rejects, non-strict logs and falls back to linear
+6.2 Keep implementation linear.
+Checkpoint G: Build succeeds; functional behavior stable.
+
+Phase 7: Migrate legacy parsing out of AnimationEvents into FBConfig
+7.1 Identify the legacy parse code path currently living in AnimationEvents:
+
+event map parsing
+
+timeline section parsing
+
+command parsing
+7.2 Move that logic into FBConfig in one of two ways:
+
+delete legacy parse and have AnimationEvents call FBConfig exclusively, OR
+
+wrap legacy data structures behind FBConfig so AnimationEvents no longer “owns” parsing
+7.3 Update AnimationEvents to:
+
+only route events (FBEvent start, stop events)
+
+request timeline name via FBConfig mapping
+
+request timeline data via FBConfig
+
+call ActorManager::StartTimeline / CancelAndReset
+7.4 Remove duplicated config globals and any “old parser” state from AnimationEvents.
+Checkpoint H: Build succeeds.
+
+Functional check 2:
+
+Existing INI file (no tweens) still behaves the same.
+
+Tweened INI file still behaves the same.
+
+Logs show config load only once (or the expected number) and no longer show AnimationEvents doing parse work.
+
+Phase 8: Concurrency and safety pass (targeted, not a cleanup)
+8.1 Ensure ActiveTweens access is properly synchronized.
+8.2 Ensure runner thread cannot outlive ActorManager destruction in a dangerous way:
+
+stop flag + notify + join in destructor (preferred)
+8.3 Ensure actor references are safe:
+
+use actor handles/weak pointers or formIDs and re-resolve each tick
+
+if actor is gone, drop tween safely
+Checkpoint I: Build succeeds; no deadlocks in a short play session.
+
+Phase 9: Logging and diagnostics (minimal)
+9.1 Add one debug log for:
+
+scheduling a tween
+
+completing a tween
+
+cancel-dropping a tween (token mismatch)
+Keep logs behind existing debug flag if you have one.
+Checkpoint J: Build succeeds.
+
+Phase 10: Final verification matrix (don’t skip)
+10.1 Instant morph command (no tween fields) still snaps exactly as before.
+10.2 Tweened morph command ramps over duration.
+10.3 Multiple tweened morphs in one timeline run concurrently correctly.
+10.4 Rapidly triggering FBEvent twice:
+
+second start cancels the first set properly (no cumulative weirdness).
+10.5 PairEnd / NPCPairedStop mid-tween:
+
+cancels and resets correctly.
+10.6 Save/load or cell transition while tweening (if easy to test):
+
+no CTD; tweens drop safely if actors unload.
+
+Deliverable completion conditions
+
+All checkpoints A through J passed.
+
+No INI breaking changes.
+
+AnimationEvents no longer owns parsing.
+
+Tween runner is centralized and contained within ActorManager.
+
+tweenSeconds implements “delta spread over time” using totalDelta/appliedSoFar.
+
+If something blows up at any checkpoint
+
+revert only the current phase changes
+
+re-run the prior checkpoint to confirm we’re back to green
+
+proceed again with smaller diffs (don’t stack multiple phases into one commit/change set).
+
+
+
+
+
+
+
+
 Authority and Scope
 
 This document provides explicit, temporary execution instructions for the Tween Refactor task.
