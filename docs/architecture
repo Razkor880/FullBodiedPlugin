@@ -1,1 +1,155 @@
+# Full Bodied Animation – Architecture
+
+This document describes the **intended canonical architecture** of the Full Bodied Animation (FBA) system. It contains both high-level flow and module-level responsibility boundaries.
+
+Unless explicitly stated otherwise, systems described here are assumed to be **correct and preferred** once marked stable.
+
+---
+
+## Core Principle
+
+> **Animations describe intent. Code executes intent.**
+
+Animations should not embed logic. Code should not embed animation-specific assumptions. The behavior graph is the handshake between them.
+
+---
+
+## High-Level Flow
+
+```
+HKX Annotation
+      ↓
+Behavior Graph Event
+      ↓
+SKSE Event Listener
+      ↓
+Event Routing / Parsing
+      ↓
+Actor Context Resolution
+      ↓
+Runtime Effect Application
+```
+
+---
+
+## Major Modules
+
+### AnimEventListener
+
+**Responsibility:**
+
+* Register animation graph event sinks
+* Receive all relevant animation events
+
+**Non-Responsibilities:**
+
+* Parsing numeric data
+* Applying effects
+* Actor ownership logic
+
+---
+
+### AnimationEvents
+
+**Responsibility:**
+
+* Interpret raw animation event payloads
+* Normalize event names and parameters
+
+**Notes:**
+
+* This is where annotation semantics are translated into structured intent
+
+---
+
+### ActorManager
+
+**Responsibility:**
+
+* Resolve actor context (caster vs target, paired roles)
+* Track active actors participating in animations
+
+**Non-Responsibilities:**
+
+* Scene graph manipulation
+* Timing logic
+
+---
+
+### FBScaler
+
+**Responsibility:**
+
+* Apply and revert NiNode scale changes
+* Maintain original scale state
+
+**Key Constraint:**
+
+* All scene graph mutations must be safe, reversible, and actor-scoped
+
+---
+
+### FBMorph
+
+**Responsibility:**
+
+* Bridge animation-driven intent to morph systems (e.g., BodySlide)
+
+**Notes:**
+
+* Must remain modular to avoid hard dependency on specific body systems
+
+---
+
+### FBConfig
+
+**Responsibility:**
+
+* Load and validate configuration data
+* Provide tunables without code changes
+
+---
+
+## Event Model
+
+* Events are semantic (e.g., `FBScale_Head(0.5)`), not procedural
+* Numeric values originate in animation data
+* Timing is owned by animation, not code
+
+---
+
+## Paired Animation Assumptions
+
+* Paired context is supported but not mandatory
+* Role resolution must be explicit
+* No reliance on killmove-only mechanics
+
+---
+
+## Stability & Canon
+
+* New systems are **provisional** by default
+* A system becomes **canon** only after:
+
+  * consistent runtime behavior
+  * repeatable testing success
+  * no hidden coupling discovered
+
+---
+
+## Explicit Non-Goals
+
+* Recreating legacy mod architectures
+* Behavior injection frameworks
+* Script-heavy logic pipelines
+
+---
+
+## Architectural North Star
+
+The ideal end state is a system where:
+
+* Animators can author behavior without touching code
+* Programmers can extend effects without touching animations
+* Behavior graphs remain readable and minimal
 
