@@ -1,653 +1,365 @@
-YourAssignment – Tween Refactor (Revised Canon for Executor)
+YOURASSIGNMENT – FBHide (Initial Invisibility + Reset)
 
-Refactor Checklist:
-Phase 0: Baseline safety
+This assignment is scoped to implementing the initial FBHide module only. Read these instructions, and refer to the checklist below as you work through the assignment. 
 
-0.1 Ensure the project builds clean on main as-is.
-0.2 Run one quick in-game smoke test:
+The goal is to deliver a minimal, reliable invisibility toggle and reset that can be safely expanded later.
 
-Trigger FBEvent once
+TASK GOAL
 
-Confirm existing instant behavior still works (scales and/or morphs)
+Implement a broad invisibility toggle using the module name FBHide, with full reset support.
+
+FBHide must:
+
+Hide visible geometry only (mesh/shapes), not skeleton nodes
+
+Be actor-scoped and reversible
+
+Work for both caster and target
+
+Reset cleanly on PairEnd / PairedStop / CancelAndReset
+
+Integrate into the existing INI -> Timeline -> ActorManager pipeline
+
+This is a v1 feature. No body-part specificity is required yet.
+
+NAMING CONSTRAINT (IMPORTANT)
+
+FBHide is the canonical, user-facing name.
+
+INI commands must use FBHide
+
+Logs should refer to FBHide
+
+Code identifiers may vary internally, but external naming must remain FBHide
+
+Do not introduce alternate names such as FBVis, FBVisibility, or HideMesh at the user-facing level.
+
+HARD CONSTRAINTS
+
+Do NOT hide skeleton nodes or parent NiNodes
+
+Do NOT rely on visibility inheritance
+
+Do NOT introduce new threads, pumps, schedulers, or hooks
+
+Do NOT break existing morph or scale behavior
+
+Do NOT change INI grammar outside of adding FBHide(bool)
+
+All operations must be safe on the game thread
+
+RESET REQUIREMENT (CRITICAL)
+
+Any visibility changes applied by FBHide must be fully undone by reset.
+
+Reset must:
+
+Restore original visibility state per shape
+
+Apply to both caster and target
+
+Run from existing reset paths (PairEnd / PairedStop / CancelAndReset)
+
+No persistent invisibility is acceptable after reset.
+
+IMPLEMENTATION EXPECTATIONS
+
+Operate on renderable geometry (BSTriShape or equivalent)
+
+Track baseline visibility state per actor
+
+Restore exactly to baseline, not a hard-coded “visible” state
+
+Safe no-op behavior if actor 3D is missing or unloaded
+
+DELIVERABLE
+
+FBHide(true/false) works in INI timelines.
+
+Manual validation:
+
+Actor becomes invisible when FBHide(true) executes
+
+Actor becomes visible again on FBHide(false)
+
+Actor becomes visible again on reset events
+
+No crashes, no stuck invisibility
+
+STOP CONDITIONS (ASK BEFORE PROCEEDING)
+
+If only parent-node invisibility appears possible
+
+If shape-level visibility APIs are unclear or unsafe
+
+If reset cannot reliably restore visibility
+
+If any change would affect existing systems outside FBHide
+
+END OF ASSIGNMENT DESCRIPTION
+
+CHECKLIST
+
+PHASE 0 - CONTEXT + CONSTRAINTS
+
+Goal is a minimal, reliable v1 invisibility feature that can be expanded later.
+
+This phase is NOT body-part-specific. It is broad visibility toggle only.
+
+Do NOT hide skeleton nodes or bones (no NiNode parent toggles).
+
+Do hide renderable geometry (shapes) so we avoid parent/child inheritance issues.
+
+Must be fully reversible and actor-scoped.
+
+Must work for both caster and target (paired context).
+
+Must not introduce new threads or timing systems.
+
+Must not break existing INI/timeline/morph/scale systems.
+
+Reset must restore original visibility for all touched shapes on CancelAndReset / PairEnd / PairedStop.
+
+Keep logs behind existing debug/log flags (bLogOps etc).
+
+Definition of “Hide” for v1
+
+Hide means: prevent rendering of the actor’s visible geometry.
+
+Implementation should operate on per-shape render objects (BSTriShape or equivalent), not bones.
+
+The system should store original visibility state per shape and restore it exactly.
+
+PHASE 1 - SURFACE API + COMMAND MODEL (MINIMAL)
+
+1.1 Add a new module/class: FBHide
+
+Files: FBHide.h / FBHide.cpp (or your project’s convention)
+
+FBHide is actor-scoped and stores per-actor hide state.
+
+1.2 Define minimum public API (names flexible, keep intent):
+
+FBHide::SetHidden(actor, bool hidden)
+
+FBHide::ResetActor(actor)
+
+FBHide::ResetAll() (optional debug helper only; not used by gameplay)
+
+FBHide::OnActor3DChanged(actor) (optional stub for future; no behavior required now)
+
+1.3 Define the v1 command name (choose one and keep it stable):
+Option A: FBHide(bool)
+Option B: FBVis(bool)
+Option C: FBHide_All(bool)
+
+Pick one and use it consistently in INI parsing and execution.
 
 Checkpoint A:
-Build succeeds. Baseline behavior unchanged.
+Code compiles with FBHide stubbed (no behavior changes yet).
 
-Phase 1: Inventory and touch-point mapping (no behavior changes)
+PHASE 2 - SHAPE DISCOVERY (GAME THREAD ONLY)
 
-1.1 Identify and document the exact structs and functions involved in:
+2.1 Implement a traversal that collects renderable shapes from an actor’s current 3D.
 
-TimedCommand definition and usage
+Input: RE::Actor*
 
-FBConfig parsing path for morph commands
+Requirement: actor must be 3D loaded; if not, no-op safely.
 
-ActorManager start / cancel / reset paths
+Traverse actor->Get3D() root, depth-first.
 
-FBMorph delta application and reset paths
+Collect objects that represent render geometry:
 
-AnimationEvents legacy parsing path to be migrated
+BSTriShape (preferred)
 
-1.2 Add small, explicit TODO/TweenRefactor comments at key entry points for audit visibility.
+Any other renderable geometry type you already use in the codebase (keep minimal; start with BSTriShape if that’s enough)
+
+2.2 For each collected shape, generate a stable “key” for tracking baseline state.
+
+Prefer pointer identity while the 3D remains loaded.
+
+Store also a string path/name for debug logs only.
+
+2.3 Store baseline visibility state per shape the first time you touch an actor.
+
+Do not store the entire actor tree forever; keep it scoped and clear it on reset.
 
 Checkpoint B:
-Build succeeds. No runtime behavior changes.
+In-game debug logs can report: “Found N shapes for actor X” when SetHidden is called (behind debug flag).
+No actual hiding yet.
 
-Phase 2: Data model extension (compile-only)
+PHASE 3 - APPLY HIDE (BROAD, NO INHERITANCE)
 
-2.1 Extend FB::TimedCommand with:
+3.1 Implement FBHide::SetHidden(actor, hidden):
 
-float tweenSeconds = 0.0
+Ensure runs on game thread (same pattern as scaling/morph ops).
 
-tweenCurve identifier (default linear)
+If actor has no 3D, no-op (optional log).
 
-2.2 Ensure all constructors, initializers, and users of TimedCommand compile without behavior changes.
+On first hide/unhide call for that actor:
 
-2.3 Ensure any logging or debug output still compiles.
+Build shape list
+
+Record baseline visibility state for each shape
+
+Apply hide/unhide to each shape individually.
+
+3.2 How to hide a shape (implementation detail):
+
+Use a per-object visibility flag that affects rendering of that shape itself.
+
+Do NOT toggle parent node visibility.
+
+Do NOT detach nodes.
+
+Do NOT scale to zero as a substitute for hide.
+
+3.3 Behavior rules:
+
+hidden = true:
+
+Set each shape invisible
+
+hidden = false:
+
+Restore baseline state for each shape (not “force visible”)
+
+This ensures compatibility if something was already invisible before FBHide touched it.
 
 Checkpoint C:
-Build succeeds. Behavior unchanged (tweenSeconds defaults to 0).
+Manual functional check:
 
-Phase 3: FBConfig parsing extension (parse-only)
+Call FBHide(true) on a test actor -> actor geometry disappears
 
-3.1 Extend morph command parsing to optionally read tween fields.
+Call FBHide(false) -> actor geometry returns
 
-3.2 Default tweenSeconds to 0.0 when absent.
+PHASE 4 - RESET INTEGRATION (CRITICAL)
 
-3.3 Strict INI behavior:
+4.1 Integrate FBHide reset into ActorManager reset paths:
 
-Malformed tween syntax rejects the command/section per existing strict rules.
+In CancelAndReset (or equivalent), call:
 
-3.4 Non-strict INI behavior:
+FBHide::ResetActor(caster)
 
-Log and ignore malformed tween fields.
+FBHide::ResetActor(target)
 
-Preserve the base command when valid.
+Ensure this is consistent with how you reset morphs and scales.
 
-3.5 Add debug logging when a tween is parsed:
+This must run on both participants even if the stop event comes from one side.
 
-Timeline
+4.2 Implement FBHide::ResetActor(actor):
 
-Role
+If actor has tracked baseline state:
 
-Morph key
+Restore each touched shape to its recorded baseline visibility state
 
-Delta
-
-tweenSeconds
-
-Curve
+Clear actor entry from FBHide state
 
 Checkpoint D:
-Build succeeds. Existing INI files load unchanged.
-Optional check: logs show tween parsing, but behavior is still instant.
+Functional check:
 
-Phase 4: Game-thread pump scaffolding (no timeline changes yet)
+Trigger hide on NPC target, then stop paired animation (PairEnd / PairedStop).
 
-4.1 Add a small self-rescheduling update pump using SKSE TaskInterface:
+Confirm NPC target becomes visible again.
 
-StartPump()
+Confirm caster also resets if hidden.
 
-PumpOnce()
+PHASE 5 - COMMAND WIRING (INI/TIMELINE)
 
-Optional StopPump()
+5.1 Add parsing support for the v1 hide command in the INI timeline grammar.
 
-4.2 PumpOnce characteristics:
+Minimal format:
+time FBHide(true)
+time FBHide(false)
 
-Runs on the game thread
+Accept boolean literals true/false (and optionally 1/0).
 
-Re-queues itself via SKSE::GetTaskInterface()->AddTask
+5.2 Route the parsed command through existing pipeline:
+INI -> FBConfig -> Timeline -> ActorManager -> FBHide
 
-Does not spawn threads
+Constraints:
 
-Does not sleep
+Do not alter other parsing semantics.
 
-4.3 Add a busy-loop guard:
+StrictIni behavior consistent with existing style:
 
-Pump must call ActorManager::Update(dt) at most once per frame
+strict: malformed bool rejects
 
-Guard must detect whether frame/time has advanced
-
-If not advanced, skip Update but still reschedule PumpOnce
-
-4.4 Add ActorManager::Update(float dt) stub (no-op).
-
-4.5 Call StartPump() from existing plugin initialization paths (DataLoaded/NewGame/PostLoadGame), with a guard to prevent multiple starts.
-
-INVARIANT:
-At most one update pump may be active.
-
-StartPump() must be guarded so it cannot schedule multiple PumpOnce loops.
-PumpOnce must ensure that at most one instance is queued or executing at any time
-(e.g., via a simple scheduled/inFlight flag).
+non-strict: logs and ignores line
 
 Checkpoint E:
-Build succeeds. Behavior unchanged. Pump runs safely without busy-looping.
+INI functional check:
 
-STOP CONDITION:
-If a reliable frame-advance guard cannot be implemented using RE state, stop and ask before proceeding.
+Add two commands:
 
-Phase 5: Locate and use RE frame delta time
+time 2.0 FBHide(true)
 
-5.1 Identify a reliable RE-provided per-frame delta time source available in the current CommonLib/RE headers.
+time 5.0 FBHide(false)
 
-5.2 Implement dt acquisition:
+Trigger FBEvent and confirm hide/unhide at correct times.
 
-dt must come from RE (not steady_clock, not fixed dt).
+PHASE 6 - SAFETY + EDGE CASES (MINIMAL)
 
-dt <= 0 or unchanged frame marker skips Update.
+6.1 Actor unload / 3D swap:
 
-5.3 Clamp or skip pathological dt values.
+If stored shape pointers become invalid (actor unload), ResetActor should no-op safely.
 
-If dt is excessively large (e.g., during loading, pause, or hitch),
-either clamp dt conservatively or skip Update for that frame.
+Prefer: if actor has no 3D on reset, just clear FBHide’s state for that actor without applying changes.
 
-This is required to prevent:
-- instant completion of tweens
-- large command bursts
-- unstable catch-up behavior
+6.2 Avoid long-lived stale state:
 
+If an actor remains hidden and gear swaps, v1 can ignore this (known limitation).
 
-5.4 Integrate dt into PumpOnce and pass into ActorManager::Update(dt).
+Document in logs (debug only) if you detect shape count mismatch.
+
+Do not attempt to handle equip-change invalidation in v1.
 
 Checkpoint F:
-Build succeeds. Update(dt) is called no more than once per frame with plausible dt values.
+Short play session check:
 
-HARD STOP:
-If no reliable RE dt source exists, stop and ask before choosing any fallback.
+No CTDs when hiding/unhiding a few times.
 
-Phase 6: Deterministic timeline runtime scaffolding (parallel, behavior preserved)
+Cancel/reset always restores visibility.
 
-6.1 Add ActiveTimeline runtime structure to ActorManager:
+No performance spikes (shape traversal is only on hide/unhide, not every frame).
 
-Token snapshot
+PHASE 7 - LOGGING (RESPECT FLAGS)
 
-Actor identities
+7.1 Add logs behind existing debug flags:
 
-Timeline identifier
+On SetHidden: actor, hidden, shapes count
 
-elapsedSeconds
+On ResetActor: actor, restored count
 
-Command scheduling state
+On parse: time, bool value (optional)
 
-Existing touched-node/morph tracking remains authoritative
+Do not spam logs per frame.
 
-6.2 Add StartTimelineDeterministic path:
+DELIVERABLE COMPLETION CONDITIONS
 
-Initializes ActiveTimeline state
+FBHide module exists and compiles.
 
-Does not spawn threads
+FBHide(true/false) works on both player and NPC.
 
-Does not replace existing StartTimeline yet
+Reset paths restore baseline visibility for both caster and target.
 
-6.3 Extend ActorManager::Update(dt):
+No skeleton-node invisibility used.
 
-Advance elapsedSeconds
+No new threads or schedulers.
 
-Determine which commands become due
+No INI breaking changes.
 
-Execute due commands instantly using existing execution paths
+Minimal logs present and gated.
 
-Do not schedule tweens yet
+STOP CONDITIONS (ASK BEFORE PROCEEDING)
 
-Checkpoint G:
-Build succeeds. Deterministic path exists but is not yet authoritative.
+If only a parent node visibility toggle appears feasible (do NOT do this) -> stop and ask.
 
-Phase 7: Replace thread-per-command timing with deterministic Update path
+If hiding shapes causes unexpected side effects (crashes, persistent invisibility) -> stop and ask with details and logs.
 
-7.1 Modify ActorManager::StartTimeline:
+If CommonLib types don’t expose a safe per-shape visibility toggle -> stop and ask; we may need an alternative render flag approach.
 
-Remove per-command sleep threads
+END OF CHECKLIST
 
-Register ActiveTimeline runtime state instead
 
-Preserve existing cancellation semantics
 
-7.2 Ensure CancelAndReset behavior remains identical:
-
-Token invalidation first
-
-ActiveTimeline entries cleared
-
-Scales and morphs reset as before
-
-7.3 Remove or disable old thread-per-command timing code cleanly.
-
-TIMELINE SEMANTICS:
-
-If elapsedSeconds advances past multiple scheduled commands in a single Update(dt),
-all due commands must execute in correct order during that Update.
-
-Do not limit execution to one command per frame.
-
-Checkpoint H:
-Build succeeds.
-
-Functional check 1:
-
-Existing INI timelines fire at correct times
-
-FBEvent start works
-
-PairEnd/NPCPairedStop cancels and resets
-
-Rapid retrigger cancels previous timeline correctly
-
-Phase 8: Central tween runner (tick-driven, no threads)
-
-8.1 Add ActiveTween container to ActorManager (single-thread ownership).
-
-8.2 ActiveTween fields:
-
-Actor identity
-
-Morph key
-
-totalDelta
-
-appliedSoFar
-
-durationSeconds
-
-elapsedSeconds
-
-Token snapshot
-
-8.3 When executing morph commands:
-
-TWEEN REPLACEMENT RULE:
-
-At most one active tween may exist per (actor, morph key).
-
-Scheduling a new tween for the same (actor, morph key)
-must replace the existing tween (not accumulate).
-
-tweenSeconds <= 0: instant AddDelta (unchanged)
-
-tweenSeconds > 0: schedule or replace ActiveTween
-
-8.4 In ActorManager::Update(dt):
-
-Token validity must be checked before applying any morph delta.
-
-Advance ActiveTweens:
-
-elapsedSeconds += dt
-
-alpha = clamp(elapsed / duration)
-
-targetApplied = totalDelta * alpha
-
-stepDelta = targetApplied - appliedSoFar
-
-Dispatch FBMorph::AddDelta(stepDelta)
-
-appliedSoFar = targetApplied
-
-Remove when complete
-
-Drop tweens immediately on token mismatch or invalid actor
-
-8.5 CancelAndReset:
-
-Immediately clears relevant ActiveTweens
-
-Token invalidation remains as safety
-
-Checkpoint I:
-Build succeeds.
-
-Functional check 2:
-
-Tweened morph ramps over tweenSeconds
-
-Mid-tween cancellation resets fully
-
-Multiple concurrent tweens work
-
-Re-trigger during tween cancels old cleanly
-
-Phase 9: Curve placeholder validation
-
-9.1 Accept only linear curve.
-9.2 Strict INI rejects unknown curves.
-9.3 Non-strict logs and falls back to linear.
-
-Checkpoint J:
-Build succeeds. Behavior stable.
-
-Phase 10: Parsing migration cleanup
-
-10.1 Migrate all legacy timeline and command parsing out of AnimationEvents into FBConfig.
-
-10.2 AnimationEvents responsibilities after migration:
-
-Receive animation graph events
-
-Filter FBEvent and stop events
-
-Resolve caster/target
-
-Request timelines from FBConfig
-
-Call ActorManager start/cancel/reset
-
-10.3 Remove duplicated config globals and legacy parser state from AnimationEvents.
-
-Checkpoint K:
-Build succeeds.
-
-Final verification matrix
-
-Instant morph commands behave exactly as before
-
-Tweened morphs ramp correctly
-
-Cancellation mid-tween leaves no residual state
-
-Reset behavior unchanged
-
-No worker threads exist for timelines or tweens
-
-ActorManager Update(dt) is sole timing authority
-
-Parsing lives exclusively in FBConfig
-
-End of checklist
-
-
-
-
-
-
-
-
-Authority and Scope
-
-This document provides explicit, temporary execution instructions for the Tween Refactor task.
-It is task-scoped and non-canonical, but authoritative for this refactor.
-
-If instructions conflict, resolve in this order:
-
-docs/architecture (once stable)
-
-This document (YourAssignment)
-
-docs/design_notes
-
-This document may override defaults and workflows, but must not redefine architecture or external contracts.
-
-Executor Role Definition
-
-You are operating as an executor GPT.
-
-Your responsibilities:
-
-Implement the refactor exactly as described
-
-Preserve existing behavior unless explicitly changed here
-
-Keep changes scoped, readable, and reversible
-
-Ask before making architectural changes beyond this assignment
-
-Prefer minimal-diff refactors over rewrites
-
-Treat existing stable systems as fragile unless instructed otherwise
-
-You must not:
-
-Invent new systems outside this scope
-
-Change external contracts (INI grammar, event names, semantics)
-
-Perform speculative or aesthetic refactors
-
-Improve or clean up unrelated code
-
-Introduce engine-level hooks or new update mechanisms
-
-Project Invariants (Must Remain True)
-
-Animations describe intent; code executes intent.
-
-Timelines may originate from INI now and HKX annotations later.
-
-Downstream runtime systems must not care about the source.
-
-The animation start event is always named FBEvent.
-
-FBEvent is authored in the paired animation clip trigger array.
-
-Cancellation and reset semantics must remain unchanged.
-
-All changes must be backward compatible with existing INI files.
-
-High-Level Goal
-
-Add optional tweening support for morph timeline commands while preserving the existing INI-driven pipeline, runtime behavior, and external contracts.
-
-Tweening must:
-
-Be optional
-
-Default to current instant behavior
-
-Distribute a command’s delta over time
-
-Integrate cleanly with the existing ActorManager execution model
-
-This refactor must also prepare (but not implement) future HKX timeline support.
-
-Tween Execution Model (Authoritative Decision)
-
-Tween stepping shall use a central tween runner thread owned by ActorManager.
-
-This runner:
-
-Is not an engine tick
-
-Is not routed through SKSE update hooks
-
-Is not frame-accurate
-
-Ticks at a fixed cadence using sleep (for example 16–33ms)
-
-Advances all active tweens in one place
-
-There must NOT be:
-
-One thread per tween
-
-Engine update hooks
-
-New scheduling systems
-
-The runner must:
-
-Be cancellable via the existing token mechanism
-
-Exit cleanly when no tweens are active (or idle safely)
-
-Dispatch all game-thread mutations via existing SKSE task mechanisms
-
-Tween Semantics (Authoritative)
-
-tweenSeconds represents the total duration over which a command’s declared delta is applied.
-
-This means:
-
-A morph command with value X applies exactly X total delta
-
-Tweening controls how quickly that delta is reached
-
-Faster tween = same result sooner
-
-Slower tween = same result later
-
-Implementation requirement:
-
-Store totalDelta and appliedSoFar
-
-Each tick applies (targetAtTime - appliedSoFar)
-
-Never repeatedly re-base off current actor state
-
-Sum of all steps must equal the declared delta (within float tolerance)
-
-No absolute target morph values are introduced.
-
-Data Model Changes (Minimal)
-
-Extend the existing timed-command representation to include:
-
-tweenSeconds (float, default 0.0)
-
-tweenCurve (enum or identifier, default linear)
-
-If tweenSeconds == 0:
-
-Command follows the existing instant execution path
-
-If tweenSeconds > 0:
-
-Command is executed via the tween system
-
-Do not:
-
-Change command naming
-
-Change existing fields
-
-Add new command types
-
-INI Parsing Changes
-
-INI grammar must remain backward compatible.
-
-Parsing updates:
-
-Extend existing command parsing to optionally read tween parameters
-
-Missing tween fields must default safely
-
-Strict INI mode must reject malformed tween syntax
-
-Non-strict mode must log and ignore invalid tween fields
-
-No reformatting of existing INI files is required.
-
-AnimationEvents Refactor Instruction
-
-Legacy timeline parsing logic currently located in AnimationEvents shall be migrated into FBConfig.
-
-After migration:
-
-FBConfig is the sole owner of timeline parsing and validation
-
-AnimationEvents acts only as an orchestration layer
-
-AnimationEvents responsibilities:
-
-Receive animation graph events
-
-Filter for FBEvent and stop events
-
-Resolve caster and target
-
-Request timeline execution from ActorManager
-
-Trigger cancel/reset on stop events
-
-AnimationEvents must not:
-
-Parse INI files
-
-Own timeline data
-
-Execute commands directly
-
-Removal of AnimationEvents entirely is NOT required at this stage.
-
-ActorManager Responsibilities (Post-Refactor)
-
-ActorManager owns:
-
-Timeline execution
-
-Tween lifecycle management
-
-Cancellation tokens
-
-Reset behavior
-
-Tracking of touched nodes and morphs
-
-ActorManager must:
-
-Route instant commands exactly as before
-
-Route tweened commands through the central tween runner
-
-Respect existing cancellation and reset semantics
-
-Remain the single source of runtime truth
-
-Future HKX Support (Stub Only)
-
-Introduce an abstraction boundary (for example a TimelineProvider concept) such that:
-
-INI timelines are provided via FBConfig
-
-HKX timelines could be added later
-
-Do NOT:
-
-Parse HKX files
-
-Load annotations
-
-Change runtime behavior
-
-Add feature flags
-
-This is a structural preparation only.
-
-Non-Goals (Explicit)
-
-This refactor must NOT:
-
-Redesign the scheduler
-
-Introduce visibility tweening
-
-Introduce absolute morph targets
-
-Change event names
-
-Change reset behavior
-
-Change cancellation semantics
-
-Touch unrelated legacy systems
-
-Perform code cleanup unrelated to tweening or parsing migration
-
-Success Criteria
-
-The refactor is successful when:
-
-Existing INI timelines behave identically with tweenSeconds = 0
-
-Morph tweening works correctly over time
-
-Cancellation mid-tween leaves no residual state
-
-Reset behavior remains correct
-
-AnimationEvents no longer parses timelines
-
-FBConfig is the single parsing authority
-
-No new engine hooks are introduced
-
-End of YourAssignment
