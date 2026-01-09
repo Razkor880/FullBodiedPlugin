@@ -1,319 +1,348 @@
-YOURASSIGNMENT – FBHide (Initial Invisibility + Reset)
+YourAssignment — FBHide v2 (Slot / Partition Hiding)
+ASSIGNMENT DESCRIPTION
+Intent
 
-This assignment is scoped to implementing the initial FBHide module only. Read these instructions, and refer to the checklist below as you work through the assignment. 
+Extend FBHide from “hide everything” to selective body-part hiding, while preserving v1 behavior, reset guarantees, and backward compatibility.
 
-The goal is to deliver a minimal, reliable invisibility toggle and reset that can be safely expanded later.
+Constraints
 
-TASK GOAL
+Checklist is the source of truth; follow in order and stop at checkpoints.
 
-Implement a broad invisibility toggle using the module name FBHide, with full reset support.
+FBHide(true/false) must continue to work exactly as-is.
 
-FBHide must:
+No new schedulers, threads, hooks, or background work.
 
-Hide visible geometry only (mesh/shapes), not skeleton nodes
+Execution must piggyback on existing timeline / game-thread update flow.
 
-Be actor-scoped and reversible
+Body-part hiding must not inherit from parent nodes (e.g., pelvis hidden while legs remain visible).
 
-Work for both caster and target
+The primary universal mechanism is BSDismember partitions, not NiNode visibility.
 
-Reset cleanly on PairEnd / PairedStop / CancelAndReset
+Scope (this pass)
 
-Integrate into the existing INI -> Timeline -> ActorManager pipeline
+Add one new, explicit, testable INI command:
 
-This is a v1 feature. No body-part specificity is required yet.
+FBHideSlot(<slotNumber>, <bool>)
 
-NAMING CONSTRAINT (IMPORTANT)
+Implement slot hiding via:
 
-FBHide is the canonical, user-facing name.
+RE::BSDismemberSkinInstance::UpdateDismemberPartition(slot, enable)
 
-INI commands must use FBHide
+(exact symbol name must match CommonLib RE headers)
 
-Logs should refer to FBHide
+Track baseline and restore on reset using a best-effort, safety-first policy.
 
-Code identifiers may vary internally, but external naming must remain FBHide
+Out of Scope (this pass)
 
-Do not introduce alternate names such as FBVis, FBVisibility, or HideMesh at the user-facing level.
+Named body-part aliases (Pelvis / UpperLeg / etc.) as primary interface.
 
-HARD CONSTRAINTS
+Regex / substring shape filters.
 
-Do NOT hide skeleton nodes or parent NiNodes
-
-Do NOT rely on visibility inheritance
-
-Do NOT introduce new threads, pumps, schedulers, or hooks
-
-Do NOT break existing morph or scale behavior
-
-Do NOT change INI grammar outside of adding FBHide(bool)
-
-All operations must be safe on the game thread
-
-RESET REQUIREMENT (CRITICAL)
-
-Any visibility changes applied by FBHide must be fully undone by reset.
-
-Reset must:
-
-Restore original visibility state per shape
-
-Apply to both caster and target
-
-Run from existing reset paths (PairEnd / PairedStop / CancelAndReset)
-
-No persistent invisibility is acceptable after reset.
-
-IMPLEMENTATION EXPECTATIONS
-
-Operate on renderable geometry (BSTriShape or equivalent)
-
-Track baseline visibility state per actor
-
-Restore exactly to baseline, not a hard-coded “visible” state
-
-Safe no-op behavior if actor 3D is missing or unloaded
-
-DELIVERABLE
-
-FBHide(true/false) works in INI timelines.
-
-Manual validation:
-
-Actor becomes invisible when FBHide(true) executes
-
-Actor becomes visible again on FBHide(false)
-
-Actor becomes visible again on reset events
-
-No crashes, no stuck invisibility
-
-STOP CONDITIONS (ASK BEFORE PROCEEDING)
-
-If only parent-node invisibility appears possible
-
-If shape-level visibility APIs are unclear or unsafe
-
-If reset cannot reliably restore visibility
-
-If any change would affect existing systems outside FBHide
+Persisting hide state across arbitrary 3D reloads beyond existing best-effort reset behavior.
 
 END OF ASSIGNMENT DESCRIPTION
 
 CHECKLIST
-PHASE 0 — Scope & Guardrails
+PHASE 0 — BASELINE SAFETY (NO CODE CHANGES)
 
-Confirm FBHide v1 is broad hide only.
+0.1 Build current main.
 
-Do not implement:
+0.2 In-game verification:
 
-body-part targeting
+FBHide(true) hides actor geometry.
 
-BSDismember partition logic
+Reset paths (PairEnd, PairedStop, CancelAndReset) restore both caster and target.
 
-mesh-specific heuristics
+Checkpoint A:
+Baseline behavior unchanged and stable.
 
-asset correction or enforcement
+PHASE 1 — DEFINE SLOT HIDING SURFACE (MINIMAL, UNIVERSAL)
 
-Confirm this module is independent of FBScaler / FBMorph except for reset wiring.
+1.1 Define the single new command:
 
-Confirm all logging is gated behind existing debug/log flags.
+FBHideSlot(slotNumber, true|false)
 
-Checkpoint: Scope is minimal, broad, and reset-focused.
-Stop Condition: Any need to inspect partitions, bones, or asset metadata beyond shape traversal.
 
-PHASE 1 — Public Module Interface
+1.2 Slot definition (explicit, documented):
 
-Implement an FBHide module with a minimal, explicit surface:
+slotNumber is the BSDismember partition “Body Part” / SBP value.
 
-ApplyHide(RE::Actor*, bool hide)
+This is NOT the biped slot from Armor UI (even if numbers often coincide).
 
-ResetActor(RE::Actor*)
+Valid range policy:
 
-(Optional, debug-only) ResetAll()
+StrictIni: accept only 0..255; reject negatives and out-of-range.
 
-Rules:
+Non-strict: log once and ignore invalid values.
 
-FBHide owns all state it mutates.
+Checkpoint B:
+Slot semantics and bounds are explicitly written down.
 
-No direct calls from animation listeners.
+PHASE 2 — DATA MODEL EXTENSION (COMPILE-ONLY)
 
-ActorManager is the sole orchestrator.
+2.1 Extend FB::TimedCommand hide payload:
 
-Checkpoint: FBHide can be called safely with a valid or invalid actor pointer.
-Stop Condition: Module requires scheduler, threading, or hooks outside ActorManager flow.
+Add:
 
-PHASE 2 — Shape Traversal (Read-Only Pass)
+HideMode hideMode (default = All)
 
-When applying hide or reset:
+std::uint16_t hideSlot = 0 (ignored unless hideMode == Slot)
 
-Acquire actor 3D safely.
+2.2 Defaults must preserve behavior:
 
-Traverse renderable geometry only:
+Existing FBHide(true/false) must behave identically.
 
-Include: BSTriShape / NiGeometry
+Checkpoint C:
+Project builds; existing INIs unchanged.
 
-Exclude: bones, helper NiNodes, non-geometry nodes
+PHASE 3 — FBConfig PARSING (UNAMBIGUOUS + BACKWARD COMPATIBLE)
 
-Do not assume:
+Important: legacy v1 parser must not accidentally swallow new commands.
 
-shape count
+3.1 Tighten legacy hide parsing
 
-partition layout
+Match only tokens that start with:
 
-consistent naming across assets
+FBHide(
 
-Traversal rules:
+Accept arguments:
 
-Traversal is stateless.
+true / false / 1 / 0
 
-No mutation during this phase.
+Case sensitivity:
 
-No raw pointers cached beyond the current pass.
+Case-sensitive matching (recommended and approved).
 
-Checkpoint: Traversal yields a deterministic list of render shapes when 3D is present.
-Stop Condition: Only parent-node or skeleton-level visibility is accessible.
+3.2 Add new parser for slot hiding
 
-PHASE 3 — Baseline Capture (First Touch Only)
+Match only:
 
-Baseline rules:
+FBHideSlot(
 
-Baseline is captured once per actor per shape.
+Parse:
 
-Baseline represents the exact visibility state as observed at first touch.
+slotNumber (int)
 
-Never overwrite baseline on subsequent calls.
+bool
 
-Storage rules (v1-safe, non-overengineered):
+Apply bounds policy (see PHASE 1.2).
 
-Store baseline keyed by:
+3.3 Emit command
 
-Actor FormID
+TimedCommand{
+  kind = kHide,
+  hideMode = Slot,
+  hideSlot = <slot>,
+  hide = <bool>
+}
 
-Shape name (string)
 
-Optional: immediate parent name (best-effort only)
+Note (explicit):
 
-Do not store raw pointers long-term.
+hide represents user intent.
 
-Cached data = keys + baseline visibility state only.
+Dismember API uses enable = !hide.
 
-Hard rule:
+Checkpoint D:
+Builds cleanly; old INIs unchanged; new token parses correctly.
 
-Never dereference cached raw pointers unless actively inside the same traversal/apply pass.
+STOP CONDITION:
+If parsing cannot be made unambiguous without breaking legacy FBHide(true/false), stop and ask.
 
-Checkpoint: Baseline map grows only on first interaction per shape.
-Stop Condition: Implementation relies on persistent raw pointers or assumes stable mesh paths.
+PHASE 4 — ACTORMANAGER DISPATCH (MECHANICAL)
 
-PHASE 4 — Apply Hide
+4.1 Replace single hide call with dispatch:
 
-Hide semantics (v1):
+If hideMode == All:
 
-Use one concrete visibility mechanism only (e.g., hidden flag).
+Call existing FBHide::ApplyHide(...)
 
-Apply the same mechanism consistently for hide and restore.
+If hideMode == Slot:
 
-Do not mix alpha, scale, or detach behavior.
+Call new FBHide::ApplyHideSlot(actor, slot, hide)
 
-Application rules:
+4.2 Reset wiring:
 
-If baseline exists → apply hide only.
+Ensure ResetActor is called for both caster and target.
 
-If baseline does not exist → capture baseline, then apply hide.
+Hard fail if either participant is omitted.
 
-If actor has no 3D → no-op safely.
+Checkpoint E:
+Builds; v1 behavior unchanged.
 
-Checkpoint: Repeated hide calls do not corrupt baseline state.
-Stop Condition: Hide cannot be reversed using the same mechanism.
+PHASE 5 — FBHide v2 INTERNALS (BSDismember SLOT HIDING)
+5.0 Baseline Restore Policy (LOCKED)
 
-PHASE 5 — Reset Semantics
+Policy 1 (preferred):
 
-Reset behavior:
+Capture actual baseline “enabled” state per (ShapeKey, slot).
 
-Triggered exclusively by ActorManager:
+Restore that value on reset.
 
-PairEnd
+Policy 2 (approved fallback):
 
-PairedStop
+Track only “touched (ShapeKey, slot) pairs”.
 
-CancelAndReset
+On reset, set enable = true for all touched pairs.
 
-Must be called for both caster and target.
+Rationale: baseline is almost always enabled; safety > historical fidelity.
 
-Reset rules:
+5.1 Baseline storage
 
-If actor 3D is present:
+New internal store:
 
-Re-traverse shapes.
+Key: (ShapeKey, slotNumber)
 
-Restore best-effort matches using stored keys.
+Value:
 
-If actor 3D is missing:
+Policy 1: baseline enabled state
 
-Safely clear FBHide state for that actor.
+Policy 2: no value; touched-only
 
-Do not attempt restoration.
+5.2 Traversal
 
-Emit debug-only log noting skipped restore.
+Reuse v1 traversal:
 
-After reset:
+Render geometry only (BSTriShape / NiGeometry)
 
-FBHide holds no residual state for that actor.
+Skip bones, helper nodes, non-render nodes.
 
-Checkpoint: Reset restores baseline when possible and never crashes.
-Hard Stop Condition: Reset wired for only one participant.
+Only attempt slot hiding on geometry with:
 
-PHASE 6 — Logging & Observability (Debug Only)
+skinInstance that is RE::BSDismemberSkinInstance.
 
-When debug/logOps enabled:
+5.3 Apply slot hide
 
-Log:
+For each eligible geometry:
 
-number of shapes discovered
+Call:
 
-number hidden
+UpdateDismemberPartition(slot, enable)
 
-number restored
+Where:
 
-Log skipped restore due to missing 3D.
+hide == true → enable = false
 
-No per-frame or per-shape spam in release logging.
+hide == false → restore baseline (Policy 1) or enable = true (Policy 2)
 
-Checkpoint: Logs are useful, sparse, and gated.
-Stop Condition: Logging required for correctness.
+5.4 Baseline capture rule
 
-PHASE 7 — Validation Scenarios
+Capture baseline once per (ShapeKey, slot).
 
-Manual / in-game validation:
+Never overwrite baseline on repeated calls.
 
-Hide + reset with:
+5.5 Unsupported meshes
 
-simple humanoid NPC
+If no eligible BSDismemberSkinInstance found:
 
-modded NPC with custom meshes
+Do nothing.
 
-Repeated hide calls without reset.
+Log once per actor per slot (guarded by logOps).
 
-PairEnd and PairedStop both restore correctly.
+Do not fall back to whole-shape hiding in this pass.
 
-Actor unload / reload (cell change, fast travel) between hide and reset:
+Checkpoint F:
+Builds; FBHideSlot produces observable changes on at least one partitioned mesh.
 
-No crash
+STOP CONDITION:
+If neither Policy 1 nor Policy 2 can be implemented safely, stop and ask.
 
-Best-effort restore or safe clear
+PHASE 6 — RESET INTEGRATION (BOTH MECHANISMS)
 
-Confirm both caster and target are handled symmetrically.
+6.1 On reset:
 
-Final Checkpoint:
-FBHide v1 proves:
+Restore:
 
-safe shape traversal
+v1 shape hidden-flag baselines
 
-baseline capture
+v2 slot baselines (per policy)
 
-reversible hide/reset
+Order does not matter.
 
-clean ActorManager integration
+6.2 After reset:
 
-Assignment complete only when all phases pass.
+Clear all FBHide state for that actor.
 
+6.3 Missing 3D on reset:
 
+Clear state.
 
+Log restore skipped (debug-only).
+
+Rely on default visible on reload.
+
+Checkpoint G:
+Cancel/reset restores visibility and clears state.
+
+PHASE 7 — TEST MATRIX (REQUIRED)
+
+7.1 Regression
+
+FBHide(true) → reset restores fully (caster + target).
+
+7.2 Slot basics
+
+FBHideSlot(slot, true) hides only that region.
+
+FBHideSlot(slot, false) restores.
+
+7.3 Pelvis vs legs
+
+On a mesh with separate partitions:
+
+Hide pelvis slot.
+
+Legs remain visible.
+
+7.4 Mid-timeline cancel
+
+Slot hide fires.
+
+Pair ends early.
+
+Reset restores.
+
+7.5 Cell transition
+
+Slot hide → cell change → reset.
+
+No CTD; restores when possible.
+
+7.6 Mixed commands
+
+FBHideSlot(slot,true)
+
+then FBHide(true)
+
+then reset
+
+Result: both shape and slot baselines restored.
+
+Checkpoint H:
+All tests pass; no crashes; no regressions.
+
+PHASE 8 — OPTIONAL QUALITY (ONLY IF GREEN)
+
+8.1 Debug dump (debug-only)
+
+Geometry count visited
+
+BSDismember instances found
+
+Slot numbers toggled
+
+8.2 Documentation
+
+Recommend numeric slots first.
+
+Note name aliases may be added later.
+
+DONE CONDITIONS
+
+FBHide(true/false) unchanged and reliable.
+
+FBHideSlot(slot,bool) works where BSDismember partitions exist.
+
+No parent/child inheritance issues.
+
+Reset restores both caster and target.
