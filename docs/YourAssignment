@@ -1,278 +1,292 @@
-YOURASSIGNMENT
+YourAssignment – Tween Refactor (Revised Canon for Executor)
 
-This document contains explicit, temporary instructions for the current task.
+Authority and Scope
 
-It is intentionally task-scoped and non-canonical.
+This document provides explicit, temporary execution instructions for the Tween Refactor task.
+It is task-scoped and non-canonical, but authoritative for this refactor.
 
-AUTHORITY ORDER
+If instructions conflict, resolve in this order:
 
-If instructions conflict, resolve them in this order:
-
-docs/architecture (canonical once stable)
+docs/architecture (once stable)
 
 This document (YourAssignment)
 
 docs/design_notes
 
-This document may override defaults and workflows,
-but it does not redefine architecture or external contracts.
+This document may override defaults and workflows, but must not redefine architecture or external contracts.
 
-EXECUTOR ROLE DEFINITION
+Executor Role Definition
 
-You are an executor GPT.
+You are operating as an executor GPT.
 
-Your job is to:
+Your responsibilities:
 
-Implement or refactor code exactly as instructed
+Implement the refactor exactly as described
 
-Preserve existing behavior unless explicitly told otherwise
+Preserve existing behavior unless explicitly changed here
 
 Keep changes scoped, readable, and reversible
 
-Ask before making architectural changes
+Ask before making architectural changes beyond this assignment
+
+Prefer minimal-diff refactors over rewrites
+
+Treat existing stable systems as fragile unless instructed otherwise
 
 You must not:
 
-Invent new systems beyond the scope described here
+Invent new systems outside this scope
 
 Change external contracts (INI grammar, event names, semantics)
 
-Perform speculative refactors
+Perform speculative or aesthetic refactors
 
-Improve unrelated code while you are here
+Improve or clean up unrelated code
 
-If unsure, stop and ask.
+Introduce engine-level hooks or new update mechanisms
 
-TASK GOAL (HIGH LEVEL)
+Project Invariants (Must Remain True)
 
-Introduce optional tweening support for morph timelines while preserving the existing INI-driven pipeline, call graph, and behavior.
+Animations describe intent; code executes intent.
 
-This work must:
+Timelines may originate from INI now and HKX annotations later.
 
-Be fully backward-compatible
+Downstream runtime systems must not care about the source.
 
-Avoid data model churn
+The animation start event is always named FBEvent.
 
-Prepare (but not implement) future HKX timeline support
+FBEvent is authored in the paired animation clip trigger array.
 
-NON-GOALS
+Cancellation and reset semantics must remain unchanged.
 
-No HKX parsing or binary loaders
+All changes must be backward compatible with existing INI files.
 
-No visibility or face morph systems
+High-Level Goal
 
-No scheduler or threading rewrites
+Add optional tweening support for morph timeline commands while preserving the existing INI-driven pipeline, runtime behavior, and external contracts.
 
-No variant-based command system
+Tweening must:
 
-No INI format redesign
+Be optional
 
-No behavior graph changes beyond existing entry points
+Default to current instant behavior
 
-STOP CONDITIONS (ASK BEFORE PROCEEDING)
+Distribute a command’s delta over time
 
-Stop and ask the user if:
+Integrate cleanly with the existing ActorManager execution model
 
-A change would affect INI grammar or ordering guarantees
+This refactor must also prepare (but not implement) future HKX timeline support.
 
-A new data structure seems unavoidable
+Tween Execution Model (Authoritative Decision)
 
-Tween logic interacts unexpectedly with paired animations
+Tween stepping shall use a central tween runner thread owned by ActorManager.
 
-Skeleton differences introduce ambiguous behavior
+This runner:
 
-More than 2-3 Skyrim-specific edge cases appear
+Is not an engine tick
 
-================================================================
-FULL CHECKLIST (EXECUTION PLAN)
+Is not routed through SKSE update hooks
 
-PHASE 0 - CONTEXT + CONSTRAINTS
+Is not frame-accurate
 
-Current baseline is stable and working using:
-INI -> FBConfig -> Timeline -> ActorManager -> MorphBridge -> NiOverride
+Ticks at a fixed cadence using sleep (for example 16–33ms)
 
-Mod already supports:
+Advances all active tweens in one place
 
-node scaling
+There must NOT be:
 
-morph deltas
+One thread per tween
 
-sticky behavior
+Engine update hooks
 
-No HKX parsing layer exists yet
--> no changes should break current INI flow
+New scheduling systems
 
-Tweening, curves, and optional durations are new
+The runner must:
 
-Visibility and face morph modules are deferred
+Be cancellable via the existing token mechanism
 
-Keep code readable and reversible
+Exit cleanly when no tweens are active (or idle safely)
 
-Avoid timeline-format churn until HKX adapter exists
+Dispatch all game-thread mutations via existing SKSE task mechanisms
 
-Do not invent new data structures unless strictly necessary
+Tween Semantics (Authoritative)
 
-PHASE 1 - DATA MODEL (MINIMAL)
+tweenSeconds represents the total duration over which a command’s declared delta is applied.
 
-Extend TimedCommand with the following fields:
+This means:
 
-morphName : string (existing)
+A morph command with value X applies exactly X total delta
 
-delta : float (existing)
+Tweening controls how quickly that delta is reached
 
-tweenSeconds : float (optional, default = 0.0 = instant)
+Faster tween = same result sooner
 
-tweenCurve : enum or string (optional, default = linear)
+Slower tween = same result later
 
-Constraints:
+Implementation requirement:
 
-No change to Timeline storage type (vector<TimedCommand>)
+Store totalDelta and appliedSoFar
 
-No change to sticky semantics
+Each tick applies (targetAtTime - appliedSoFar)
 
-Do not introduce variant command types
+Never repeatedly re-base off current actor state
 
-Morph-only model remains in place for now
+Sum of all steps must equal the declared delta (within float tolerance)
 
-PHASE 2 - INI LOADER (MINIMAL DELTAS)
+No absolute target morph values are introduced.
 
-Modify parser to detect extended syntax without breaking old syntax.
+Data Model Changes (Minimal)
 
-Syntax example:
-time key(delta tweenSeconds=1.5 curve=linear)
+Extend the existing timed-command representation to include:
 
-Required behaviors:
+tweenSeconds (float, default 0.0)
 
-If tweenSeconds missing, default to 0.0
+tweenCurve (enum or identifier, default linear)
 
-If curve missing, default to linear
+If tweenSeconds == 0:
 
-Reject malformed extended syntax only if bStrictIni=true
+Command follows the existing instant execution path
 
-Print helpful logs when extended fields are parsed
+If tweenSeconds > 0:
 
-Constraints:
+Command is executed via the tween system
 
-No redesign of EventMap or TimelineMap
+Do not:
 
-Old INI files must load unchanged
+Change command naming
 
-PHASE 3 - CORE ENGINE (ACTORMANAGER) TWEEN PIPE
+Change existing fields
 
-Do not build a global scheduler rewrite
+Add new command types
 
-Add a small per-actor morph tween buffer
-Example: map<ActorHandle, vector<MorphTween>>
+INI Parsing Changes
 
-On command dispatch:
+INI grammar must remain backward compatible.
 
-If tweenSeconds == 0, apply instantly (existing path)
+Parsing updates:
 
-If tweenSeconds > 0, create tween entry and schedule interpolation
+Extend existing command parsing to optionally read tween parameters
 
-Ticks:
+Missing tween fields must default safely
 
-Use existing tick frequency
+Strict INI mode must reject malformed tween syntax
 
-Do not add threads or schedulers
+Non-strict mode must log and ignore invalid tween fields
 
-Tween resolution is tied to existing timeline tick rate
+No reformatting of existing INI files is required.
 
-At tween completion:
+AnimationEvents Refactor Instruction
 
-Sticky semantics still apply
+Legacy timeline parsing logic currently located in AnimationEvents shall be migrated into FBConfig.
 
-Do not modify sticky reset logic
+After migration:
 
-PHASE 4 - EVENT FLOW COMPATIBILITY
+FBConfig is the sole owner of timeline parsing and validation
 
-Keep existing call graph intact:
+AnimationEvents acts only as an orchestration layer
 
-INI -> FBConfig -> ActorManager -> Morph -> Bridge -> NiOverride
+AnimationEvents responsibilities:
 
-Do not modify AnimationEvents.cpp beyond:
+Receive animation graph events
 
-recognizing StartTimeline
+Filter for FBEvent and stop events
 
-recognizing sticky resets
+Resolve caster and target
 
-adding an optional future HKX entry point (stub only)
+Request timeline execution from ActorManager
 
-PHASE 5 - HKX LAYER (FUTURE STUB ONLY)
+Trigger cancel/reset on stop events
 
-Introduce placeholder abstraction:
+AnimationEvents must not:
 
-struct TimelineProvider {
-virtual Optional<Timeline> GetTimelineForEvent(string eventName);
-};
+Parse INI files
 
-Implementations:
+Own timeline data
 
-IniTimelineProvider (current)
+Execute commands directly
 
-HkxTimelineProvider (future)
+Removal of AnimationEvents entirely is NOT required at this stage.
 
-Composition options:
+ActorManager Responsibilities (Post-Refactor)
 
-First try INI, then HKX
+ActorManager owns:
 
-Or merged timelines (no behavior yet)
+Timeline execution
 
-Constraints:
+Tween lifecycle management
 
-Do not parse HKX
+Cancellation tokens
 
-No binary loader
+Reset behavior
 
-Must compile cleanly
+Tracking of touched nodes and morphs
 
-Must not affect runtime behavior
+ActorManager must:
 
-PHASE 6 - RESET + CLEANUP BEHAVIOR
+Route instant commands exactly as before
 
-Sticky semantics unchanged
+Route tweened commands through the central tween runner
 
-Reset behavior unchanged (PairEnd / PairedStop)
+Respect existing cancellation and reset semantics
 
-Do not touch visibility reset or node reset
+Remain the single source of runtime truth
 
-Morph reset continues to zero or prior baseline (existing behavior)
+Future HKX Support (Stub Only)
 
-PHASE 7 - LOGGING + DEBUG
+Introduce an abstraction boundary (for example a TimelineProvider concept) such that:
 
-Add logs for:
+INI timelines are provided via FBConfig
 
-loaded tweenSeconds
+HKX timelines could be added later
 
-applied tween increments
+Do NOT:
 
-completed tween
+Parse HKX files
 
-Constraints:
+Load annotations
 
-Respect bLogOps
+Change runtime behavior
 
-Respect bLogTimelineStart
+Add feature flags
 
-Do not spam logs
+This is a structural preparation only.
 
-PHASE 8 - GPT-TO-GPT COLLABORATION NOTES
+Non-Goals (Explicit)
 
-Summaries matter: ask for a short summary every ~20 turns
+This refactor must NOT:
 
-Be willing to re-request expired code uploads
+Redesign the scheduler
 
-Keep diffs scoped and reversible per phase
+Introduce visibility tweening
 
-Ask user when assumptions exceed 2-3 edge cases
+Introduce absolute morph targets
 
-Keep memory usage light (store deltas + specs, not whole repos)
+Change event names
 
-Re-state invariants periodically
-Example: actor morphs must never break paired animations
+Change reset behavior
 
-Pay is nonexistent, but the work is honorable and for modding glory.
+Change cancellation semantics
 
-================================================================
-END CHECKLIST
+Touch unrelated legacy systems
 
+Perform code cleanup unrelated to tweening or parsing migration
+
+Success Criteria
+
+The refactor is successful when:
+
+Existing INI timelines behave identically with tweenSeconds = 0
+
+Morph tweening works correctly over time
+
+Cancellation mid-tween leaves no residual state
+
+Reset behavior remains correct
+
+AnimationEvents no longer parses timelines
+
+FBConfig is the single parsing authority
+
+No new engine hooks are introduced
+
+End of YourAssignment
