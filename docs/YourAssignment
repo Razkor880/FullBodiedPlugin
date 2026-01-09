@@ -99,267 +99,221 @@ If any change would affect existing systems outside FBHide
 END OF ASSIGNMENT DESCRIPTION
 
 CHECKLIST
+PHASE 0 — Scope & Guardrails
 
-PHASE 0 - CONTEXT + CONSTRAINTS
+Confirm FBHide v1 is broad hide only.
 
-Goal is a minimal, reliable v1 invisibility feature that can be expanded later.
+Do not implement:
 
-This phase is NOT body-part-specific. It is broad visibility toggle only.
+body-part targeting
 
-Do NOT hide skeleton nodes or bones (no NiNode parent toggles).
+BSDismember partition logic
 
-Do hide renderable geometry (shapes) so we avoid parent/child inheritance issues.
+mesh-specific heuristics
 
-Must be fully reversible and actor-scoped.
+asset correction or enforcement
 
-Must work for both caster and target (paired context).
+Confirm this module is independent of FBScaler / FBMorph except for reset wiring.
 
-Must not introduce new threads or timing systems.
+Confirm all logging is gated behind existing debug/log flags.
 
-Must not break existing INI/timeline/morph/scale systems.
+Checkpoint: Scope is minimal, broad, and reset-focused.
+Stop Condition: Any need to inspect partitions, bones, or asset metadata beyond shape traversal.
 
-Reset must restore original visibility for all touched shapes on CancelAndReset / PairEnd / PairedStop.
+PHASE 1 — Public Module Interface
 
-Keep logs behind existing debug/log flags (bLogOps etc).
+Implement an FBHide module with a minimal, explicit surface:
 
-Definition of “Hide” for v1
+ApplyHide(RE::Actor*, bool hide)
 
-Hide means: prevent rendering of the actor’s visible geometry.
+ResetActor(RE::Actor*)
 
-Implementation should operate on per-shape render objects (BSTriShape or equivalent), not bones.
+(Optional, debug-only) ResetAll()
 
-The system should store original visibility state per shape and restore it exactly.
+Rules:
 
-PHASE 1 - SURFACE API + COMMAND MODEL (MINIMAL)
+FBHide owns all state it mutates.
 
-1.1 Add a new module/class: FBHide
+No direct calls from animation listeners.
 
-Files: FBHide.h / FBHide.cpp (or your project’s convention)
+ActorManager is the sole orchestrator.
 
-FBHide is actor-scoped and stores per-actor hide state.
+Checkpoint: FBHide can be called safely with a valid or invalid actor pointer.
+Stop Condition: Module requires scheduler, threading, or hooks outside ActorManager flow.
 
-1.2 Define minimum public API (names flexible, keep intent):
+PHASE 2 — Shape Traversal (Read-Only Pass)
 
-FBHide::SetHidden(actor, bool hidden)
+When applying hide or reset:
 
-FBHide::ResetActor(actor)
+Acquire actor 3D safely.
 
-FBHide::ResetAll() (optional debug helper only; not used by gameplay)
+Traverse renderable geometry only:
 
-FBHide::OnActor3DChanged(actor) (optional stub for future; no behavior required now)
+Include: BSTriShape / NiGeometry
 
-1.3 Define the v1 command name (choose one and keep it stable):
-Option A: FBHide(bool)
-Option B: FBVis(bool)
-Option C: FBHide_All(bool)
+Exclude: bones, helper NiNodes, non-geometry nodes
 
-Pick one and use it consistently in INI parsing and execution.
+Do not assume:
 
-Checkpoint A:
-Code compiles with FBHide stubbed (no behavior changes yet).
+shape count
 
-PHASE 2 - SHAPE DISCOVERY (GAME THREAD ONLY)
+partition layout
 
-2.1 Implement a traversal that collects renderable shapes from an actor’s current 3D.
+consistent naming across assets
 
-Input: RE::Actor*
+Traversal rules:
 
-Requirement: actor must be 3D loaded; if not, no-op safely.
+Traversal is stateless.
 
-Traverse actor->Get3D() root, depth-first.
+No mutation during this phase.
 
-Collect objects that represent render geometry:
+No raw pointers cached beyond the current pass.
 
-BSTriShape (preferred)
+Checkpoint: Traversal yields a deterministic list of render shapes when 3D is present.
+Stop Condition: Only parent-node or skeleton-level visibility is accessible.
 
-Any other renderable geometry type you already use in the codebase (keep minimal; start with BSTriShape if that’s enough)
+PHASE 3 — Baseline Capture (First Touch Only)
 
-2.2 For each collected shape, generate a stable “key” for tracking baseline state.
+Baseline rules:
 
-Prefer pointer identity while the 3D remains loaded.
+Baseline is captured once per actor per shape.
 
-Store also a string path/name for debug logs only.
+Baseline represents the exact visibility state as observed at first touch.
 
-2.3 Store baseline visibility state per shape the first time you touch an actor.
+Never overwrite baseline on subsequent calls.
 
-Do not store the entire actor tree forever; keep it scoped and clear it on reset.
+Storage rules (v1-safe, non-overengineered):
 
-Checkpoint B:
-In-game debug logs can report: “Found N shapes for actor X” when SetHidden is called (behind debug flag).
-No actual hiding yet.
+Store baseline keyed by:
 
-PHASE 3 - APPLY HIDE (BROAD, NO INHERITANCE)
+Actor FormID
 
-3.1 Implement FBHide::SetHidden(actor, hidden):
+Shape name (string)
 
-Ensure runs on game thread (same pattern as scaling/morph ops).
+Optional: immediate parent name (best-effort only)
 
-If actor has no 3D, no-op (optional log).
+Do not store raw pointers long-term.
 
-On first hide/unhide call for that actor:
+Cached data = keys + baseline visibility state only.
 
-Build shape list
+Hard rule:
 
-Record baseline visibility state for each shape
+Never dereference cached raw pointers unless actively inside the same traversal/apply pass.
 
-Apply hide/unhide to each shape individually.
+Checkpoint: Baseline map grows only on first interaction per shape.
+Stop Condition: Implementation relies on persistent raw pointers or assumes stable mesh paths.
 
-3.2 How to hide a shape (implementation detail):
+PHASE 4 — Apply Hide
 
-Use a per-object visibility flag that affects rendering of that shape itself.
+Hide semantics (v1):
 
-Do NOT toggle parent node visibility.
+Use one concrete visibility mechanism only (e.g., hidden flag).
 
-Do NOT detach nodes.
+Apply the same mechanism consistently for hide and restore.
 
-Do NOT scale to zero as a substitute for hide.
+Do not mix alpha, scale, or detach behavior.
 
-3.3 Behavior rules:
+Application rules:
 
-hidden = true:
+If baseline exists → apply hide only.
 
-Set each shape invisible
+If baseline does not exist → capture baseline, then apply hide.
 
-hidden = false:
+If actor has no 3D → no-op safely.
 
-Restore baseline state for each shape (not “force visible”)
+Checkpoint: Repeated hide calls do not corrupt baseline state.
+Stop Condition: Hide cannot be reversed using the same mechanism.
 
-This ensures compatibility if something was already invisible before FBHide touched it.
+PHASE 5 — Reset Semantics
 
-Checkpoint C:
-Manual functional check:
+Reset behavior:
 
-Call FBHide(true) on a test actor -> actor geometry disappears
+Triggered exclusively by ActorManager:
 
-Call FBHide(false) -> actor geometry returns
+PairEnd
 
-PHASE 4 - RESET INTEGRATION (CRITICAL)
+PairedStop
 
-4.1 Integrate FBHide reset into ActorManager reset paths:
+CancelAndReset
 
-In CancelAndReset (or equivalent), call:
+Must be called for both caster and target.
 
-FBHide::ResetActor(caster)
+Reset rules:
 
-FBHide::ResetActor(target)
+If actor 3D is present:
 
-Ensure this is consistent with how you reset morphs and scales.
+Re-traverse shapes.
 
-This must run on both participants even if the stop event comes from one side.
+Restore best-effort matches using stored keys.
 
-4.2 Implement FBHide::ResetActor(actor):
+If actor 3D is missing:
 
-If actor has tracked baseline state:
+Safely clear FBHide state for that actor.
 
-Restore each touched shape to its recorded baseline visibility state
+Do not attempt restoration.
 
-Clear actor entry from FBHide state
+Emit debug-only log noting skipped restore.
 
-Checkpoint D:
-Functional check:
+After reset:
 
-Trigger hide on NPC target, then stop paired animation (PairEnd / PairedStop).
+FBHide holds no residual state for that actor.
 
-Confirm NPC target becomes visible again.
+Checkpoint: Reset restores baseline when possible and never crashes.
+Hard Stop Condition: Reset wired for only one participant.
 
-Confirm caster also resets if hidden.
+PHASE 6 — Logging & Observability (Debug Only)
 
-PHASE 5 - COMMAND WIRING (INI/TIMELINE)
+When debug/logOps enabled:
 
-5.1 Add parsing support for the v1 hide command in the INI timeline grammar.
+Log:
 
-Minimal format:
-time FBHide(true)
-time FBHide(false)
+number of shapes discovered
 
-Accept boolean literals true/false (and optionally 1/0).
+number hidden
 
-5.2 Route the parsed command through existing pipeline:
-INI -> FBConfig -> Timeline -> ActorManager -> FBHide
+number restored
 
-Constraints:
+Log skipped restore due to missing 3D.
 
-Do not alter other parsing semantics.
+No per-frame or per-shape spam in release logging.
 
-StrictIni behavior consistent with existing style:
+Checkpoint: Logs are useful, sparse, and gated.
+Stop Condition: Logging required for correctness.
 
-strict: malformed bool rejects
+PHASE 7 — Validation Scenarios
 
-non-strict: logs and ignores line
+Manual / in-game validation:
 
-Checkpoint E:
-INI functional check:
+Hide + reset with:
 
-Add two commands:
+simple humanoid NPC
 
-time 2.0 FBHide(true)
+modded NPC with custom meshes
 
-time 5.0 FBHide(false)
+Repeated hide calls without reset.
 
-Trigger FBEvent and confirm hide/unhide at correct times.
+PairEnd and PairedStop both restore correctly.
 
-PHASE 6 - SAFETY + EDGE CASES (MINIMAL)
+Actor unload / reload (cell change, fast travel) between hide and reset:
 
-6.1 Actor unload / 3D swap:
+No crash
 
-If stored shape pointers become invalid (actor unload), ResetActor should no-op safely.
+Best-effort restore or safe clear
 
-Prefer: if actor has no 3D on reset, just clear FBHide’s state for that actor without applying changes.
+Confirm both caster and target are handled symmetrically.
 
-6.2 Avoid long-lived stale state:
+Final Checkpoint:
+FBHide v1 proves:
 
-If an actor remains hidden and gear swaps, v1 can ignore this (known limitation).
+safe shape traversal
 
-Document in logs (debug only) if you detect shape count mismatch.
+baseline capture
 
-Do not attempt to handle equip-change invalidation in v1.
+reversible hide/reset
 
-Checkpoint F:
-Short play session check:
+clean ActorManager integration
 
-No CTDs when hiding/unhiding a few times.
-
-Cancel/reset always restores visibility.
-
-No performance spikes (shape traversal is only on hide/unhide, not every frame).
-
-PHASE 7 - LOGGING (RESPECT FLAGS)
-
-7.1 Add logs behind existing debug flags:
-
-On SetHidden: actor, hidden, shapes count
-
-On ResetActor: actor, restored count
-
-On parse: time, bool value (optional)
-
-Do not spam logs per frame.
-
-DELIVERABLE COMPLETION CONDITIONS
-
-FBHide module exists and compiles.
-
-FBHide(true/false) works on both player and NPC.
-
-Reset paths restore baseline visibility for both caster and target.
-
-No skeleton-node invisibility used.
-
-No new threads or schedulers.
-
-No INI breaking changes.
-
-Minimal logs present and gated.
-
-STOP CONDITIONS (ASK BEFORE PROCEEDING)
-
-If only a parent node visibility toggle appears feasible (do NOT do this) -> stop and ask.
-
-If hiding shapes causes unexpected side effects (crashes, persistent invisibility) -> stop and ask with details and logs.
-
-If CommonLib types don’t expose a safe per-shape visibility toggle -> stop and ask; we may need an alternative render flag approach.
-
-END OF CHECKLIST
+Assignment complete only when all phases pass.
 
 
 
