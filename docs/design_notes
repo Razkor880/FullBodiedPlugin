@@ -6,75 +6,81 @@ Anything here may change or be discarded.
 
 ---
 
-REFERENCE MATERIAL
+## Reference Material
 
-Legacy mods and prior work may be consulted for understanding existing behavior or pitfalls, but their architectures are not treated as templates.
+Legacy mods and prior work may be consulted for understanding existing behavior or pitfalls, but their architectures are **not treated as templates**.
 
 This project intentionally favors modern, explicit, and maintainable approaches.
 
 ---
 
-GUIDING CONSTRAINTS
+## Guiding Constraints
 
-* Default to CommonLibSSE-NG
-* Prefer configuration-driven systems initially
-* Support annotation-driven input long-term using the same pipeline
-* Avoid hidden coupling between modules
-
----
-
-THINGS WE EXPLICITLY DO NOT WANT
-
-* Silent magic numbers
-* Animation-specific hardcoding in SKSE logic
-* Heavy Papyrus logic
-* Global state without clear ownership
-* Feature creep without architectural justification
+- Default to CommonLibSSE-NG
+- Prefer configuration-driven systems initially
+- Support annotation-driven input long-term using the same pipeline
+- Avoid hidden coupling between modules
 
 ---
 
-KNOWN AREAS OF FRICTION
+## Things We Explicitly Do Not Want
 
-* Behavior graph timing semantics
-* Paired animation role resolution
-* Skeleton differences and node inheritance
-* Visibility without collapsing child nodes
+- Silent magic numbers
+- Animation-specific hardcoding in SKSE logic
+- Heavy Papyrus logic
+- Global state without clear ownership
+- Feature creep without architectural justification
+
+---
+
+## Known Areas of Friction
+
+- Behavior graph timing semantics
+- Paired animation role resolution
+- Skeleton differences and node inheritance
+- Visibility without collapsing child nodes
 
 These are candidates for refactors or abstraction layers.
 
 ---
 
-EXPERIMENTS AND OPEN IDEAS
+## Experiments and Open Ideas
 
-* Unified grammar for scale, visibility, and morph events
-* Coexistence of INI timelines and annotations
-* Stateless versus stateful effect application
-* Declarative event descriptions versus imperative logic
+- Unified grammar for scale, visibility, and morph events
+- Coexistence of INI timelines and annotations
+- Stateless versus stateful effect application
+- Declarative event descriptions versus imperative logic
 
 ---
 
-REFACTOR TRIGGERS
+## Refactor Triggers
 
 Propose a refactor when:
-
-* The same workaround appears more than twice
-* A module accumulates unrelated responsibilities
-* Debugging requires cross-module knowledge
-
----
-
-GPT COLLABORATION RULES
-
-* Propose alternatives proactively
-* Never apply changes without approval
-* Always disclose what would change
-* Treat this file as safe space for speculation
+- The same workaround appears more than twice
+- A module accumulates unrelated responsibilities
+- Debugging requires cross-module knowledge
 
 ---
 
-OPEN QUESTIONS
+## Relationship to `YourAssignment`
 
-* Where should long-lived actor state live?
-* How much responsibility should behavior graphs carry?
-* When does flexibility turn into ambiguity?
+`docs/YourAssignment` is where **active execution happens**.
 
+This document is where ideas live **until they earn permanence**.
+
+---
+
+## GPT Collaboration Rules
+
+- Propose alternatives proactively
+- Never apply changes without approval
+- Always disclose what would change
+- Treat this file as a safe space for speculation
+
+---
+
+## Open Questions
+
+- Where should long-lived actor state live?
+- How much responsibility should behavior graphs carry?
+- When does flexibility turn into ambiguity?
