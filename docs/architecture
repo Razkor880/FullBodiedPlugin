@@ -1,8 +1,8 @@
 # Full Bodied Animation – Architecture
 
-This document describes the **intended canonical architecture** of the Full Bodied Animation (FBA) system. It contains both high-level flow and module-level responsibility boundaries.
+This document describes the intended architecture of the Full Bodied Animation (FBA) system.
 
-Unless explicitly stated otherwise, systems described here are assumed to be **correct and preferred** once marked stable.
+Unless explicitly stated otherwise, systems described here are assumed to be correct and preferred **once they have demonstrated consistent runtime behavior**.
 
 ---
 
@@ -10,146 +10,130 @@ Unless explicitly stated otherwise, systems described here are assumed to be **c
 
 > **Animations describe intent. Code executes intent.**
 
-Animations should not embed logic. Code should not embed animation-specific assumptions. The behavior graph is the handshake between them.
+The animation system provides timing and context.  
+The SKSE plugin provides interpretation, safety, and execution.
 
 ---
 
 ## High-Level Flow
 
-```
-HKX Annotation
-      ↓
-Behavior Graph Event
-      ↓
-SKSE Event Listener
-      ↓
-Event Routing / Parsing
-      ↓
+Animation Context (event, paired state)
+↓
+Input Source (INI today, annotations later)
+↓
+Unified Internal Event Representation
+↓
 Actor Context Resolution
-      ↓
+↓
+Effect Scheduling
+↓
 Runtime Effect Application
-```
+↓
+Cleanup / Reversion
+
+---
+
+## Input Sources: INI and Annotations
+
+The system is designed so that **INI-based timelines and HKX annotations feed the same internal pipeline**.
+
+- **INI files**
+  - External, editable timelines
+  - Keyed by animation and role
+- **Annotations**
+  - Embedded, per-clip timing and parameters
+
+Both are translated into the same internal event representation before any effects are applied.
+
+> No downstream system should need to know whether an effect originated from an INI or an annotation.
+
+---
+
+## INI Structure and Stability Contract
+
+The INI format is an **external contract**.
+
+### Stable Assumptions
+- Section headers identify animation context and role
+- Timeline entries are ordered by time
+- Event names and parameter ordering are stable
+
+### Changes That Will Break Parsers or Scripts
+- Event naming conventions
+- Parameter ordering
+- Section header grammar
+
+Internal parsing may evolve, but **the external INI grammar must remain stable once declared canon**.
 
 ---
 
 ## Major Modules
 
 ### AnimEventListener
-
-**Responsibility:**
-
-* Register animation graph event sinks
-* Receive all relevant animation events
-
-**Non-Responsibilities:**
-
-* Parsing numeric data
-* Applying effects
-* Actor ownership logic
-
----
+- Registers animation graph event sinks
+- Receives animation events
+- Does **not** parse parameters
+- Does **not** apply effects
 
 ### AnimationEvents
-
-**Responsibility:**
-
-* Interpret raw animation event payloads
-* Normalize event names and parameters
-
-**Notes:**
-
-* This is where annotation semantics are translated into structured intent
-
----
+- Interprets raw event payloads
+- Normalizes event names and parameters
+- Produces structured internal events
 
 ### ActorManager
-
-**Responsibility:**
-
-* Resolve actor context (caster vs target, paired roles)
-* Track active actors participating in animations
-
-**Non-Responsibilities:**
-
-* Scene graph manipulation
-* Timing logic
-
----
-
-### FBScaler
-
-**Responsibility:**
-
-* Apply and revert NiNode scale changes
-* Maintain original scale state
-
-**Key Constraint:**
-
-* All scene graph mutations must be safe, reversible, and actor-scoped
-
----
-
-### FBMorph
-
-**Responsibility:**
-
-* Bridge animation-driven intent to morph systems (e.g., BodySlide)
-
-**Notes:**
-
-* Must remain modular to avoid hard dependency on specific body systems
-
----
+- Resolves actor roles (caster, target, paired participants)
+- Tracks active animation participants
+- Owns actor-scoped state
 
 ### FBConfig
+- Loads and validates INI configuration
+- Provides timelines and tunables
+- Owns no runtime state
 
-**Responsibility:**
+### FBScaler
+- Applies and reverts NiNode scale changes
+- Preserves original values
+- Must be fully reversible and actor-scoped
 
-* Load and validate configuration data
-* Provide tunables without code changes
-
----
-
-## Event Model
-
-* Events are semantic (e.g., `FBScale_Head(0.5)`), not procedural
-* Numeric values originate in animation data
-* Timing is owned by animation, not code
+### FBMorph
+- Bridges runtime intent to morph systems
+- Must remain modular and optional
 
 ---
 
 ## Paired Animation Assumptions
 
-* Paired context is supported but not mandatory
-* Role resolution must be explicit
-* No reliance on killmove-only mechanics
+- Paired context is supported but not required
+- Actor roles must be explicit
+- No reliance on killmove-only mechanics
 
 ---
 
-## Stability & Canon
+## Canon and Stability
 
-* New systems are **provisional** by default
-* A system becomes **canon** only after:
+A system becomes **canon** only after:
 
-  * consistent runtime behavior
-  * repeatable testing success
-  * no hidden coupling discovered
+- Consistent runtime behavior
+- Repeatable testing success
+- No hidden cross-module coupling
+
+Until then, it is considered **provisional**.
 
 ---
 
-## Explicit Non-Goals
+## On `YourAssignment`
 
-* Recreating legacy mod architectures
-* Behavior injection frameworks
-* Script-heavy logic pipelines
+`docs/YourAssignment` does **not** define architecture.
+
+It may provide explicit, temporary instructions for execution, testing, or refactoring, but it does not override or reinterpret this document.
+
+> If there is a conflict, **architecture takes precedence**.
 
 ---
 
 ## Architectural North Star
 
-The ideal end state is a system where:
-
-* Animators can author behavior without touching code
-* Programmers can extend effects without touching animations
-* Behavior graphs remain readable and minimal
-
+- Animators can author behavior without touching code
+- Programmers can add effects without touching animations
+- INI and annotation inputs converge on one execution path
+- Behavior graphs remain readable and minimal
