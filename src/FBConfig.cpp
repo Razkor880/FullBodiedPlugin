@@ -71,6 +71,24 @@ namespace
 		return f;
 	}
 
+	static inline std::string ToLower(std::string s)
+	{
+		for (auto& ch : s) {
+			ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+		}
+		return s;
+	}
+
+	static std::optional<FB::TweenCurve> ParseTweenCurve(std::string s)
+	{
+		TrimInPlace(s);
+		s = ToLower(std::move(s));
+		if (s.empty() || s == "linear") {
+			return FB::TweenCurve::kLinear;
+		}
+		return std::nullopt;
+	}
+
 	static bool ParseBool(const std::string& v, bool fallback)
 	{
 		std::string s = v;
@@ -237,7 +255,13 @@ namespace
 	{
 		std::string morphName;  // OWNS
 		float delta{ 0.0f };
+
+		// Optional tween fields (Phase 3 parses, Phase 8 executes)
+		float tweenSeconds{ 0.0f };
+		FB::TweenCurve tweenCurve{ FB::TweenCurve::kLinear };
 	};
+
+
 
 	static std::string ResolveMorphAlias(std::string_view authorKey)
 	{
@@ -261,8 +285,8 @@ namespace
 
 		const size_t open = tok.find('(');
 		const size_t close = tok.rfind(')');
-		if (open == std::string_view::npos || close == std::string_view::npos ||
-			close <= open + 1 || close != tok.size() - 1) {
+
+		if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1 || close != tok.size() - 1) {
 			if (strictIni) {
 				spdlog::warn("[FB] INI: bad call syntax '{}'", std::string(tok));
 			}
@@ -278,7 +302,6 @@ namespace
 
 		const std::string_view authorKey = tok.substr(prefix.size(), open - prefix.size());
 		std::string morphName = ResolveMorphAlias(authorKey);
-
 		if (morphName.empty()) {
 			if (strictIni) {
 				spdlog::warn("[FB] INI: empty MorphKey in '{}'", std::string(tok));
@@ -286,13 +309,27 @@ namespace
 			return std::nullopt;
 		}
 
-		std::string arg{ tok.substr(open + 1, close - open - 1) };
-		TrimInPlace(arg);
+		// Args can be:
+		//   (delta)
+		//   (delta, tween=0.5, curve=linear)
+		std::string args{ tok.substr(open + 1, close - open - 1) };
+		TrimInPlace(args);
 
-		auto f = ParseFloat(arg);
+		auto parts = Split(args, ',');
+		if (parts.empty()) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: FBMorph missing args in '{}'", std::string(tok));
+			}
+			return std::nullopt;
+		}
+
+		// First arg is always delta
+		std::string deltaStr = parts[0];
+		TrimInPlace(deltaStr);
+		auto f = ParseFloat(deltaStr);
 		if (!f) {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: FBMorph arg not a float '{}' in '{}'", arg, std::string(tok));
+				spdlog::warn("[FB] INI: FBMorph arg not a float '{}' in '{}'", deltaStr, std::string(tok));
 			}
 			return std::nullopt;
 		}
@@ -300,8 +337,67 @@ namespace
 		ParsedMorph out;
 		out.morphName = std::move(morphName);
 		out.delta = *f;
+
+		// Optional key=value fields
+		for (size_t i = 1; i < parts.size(); ++i) {
+			std::string kv = parts[i];
+			TrimInPlace(kv);
+			if (kv.empty()) {
+				continue;
+			}
+
+			const auto eq = kv.find('=');
+			if (eq == std::string::npos) {
+				if (strictIni) {
+					spdlog::warn("[FB] INI: FBMorph tween field missing '=' in '{}' (token '{}')", kv, std::string(tok));
+					return std::nullopt;
+				}
+				spdlog::warn("[FB] INI: FBMorph ignoring tween field '{}' (token '{}')", kv, std::string(tok));
+				continue;
+			}
+
+			std::string key = kv.substr(0, eq);
+			std::string val = kv.substr(eq + 1);
+			TrimInPlace(key);
+			TrimInPlace(val);
+			key = ToLower(std::move(key));
+
+			if (key == "tween" || key == "tweenseconds" || key == "duration" || key == "dur") {
+				auto tf = ParseFloat(val);
+				if (!tf || *tf < 0.0f) {
+					if (strictIni) {
+						spdlog::warn("[FB] INI: FBMorph invalid tweenSeconds '{}' (token '{}')", val, std::string(tok));
+						return std::nullopt;
+					}
+					spdlog::warn("[FB] INI: FBMorph ignoring invalid tweenSeconds '{}' (token '{}')", val, std::string(tok));
+					continue;
+				}
+				out.tweenSeconds = *tf;
+			}
+			else if (key == "curve") {
+				auto curve = ParseTweenCurve(val);
+				if (!curve) {
+					if (strictIni) {
+						spdlog::warn("[FB] INI: FBMorph unknown tween curve '{}' (token '{}')", val, std::string(tok));
+						return std::nullopt;
+					}
+					spdlog::warn("[FB] INI: FBMorph ignoring unknown tween curve '{}' (token '{}')", val, std::string(tok));
+					continue;
+				}
+				out.tweenCurve = *curve;
+			}
+			else {
+				if (strictIni) {
+					spdlog::warn("[FB] INI: FBMorph unknown tween field '{}' (token '{}')", key, std::string(tok));
+					return std::nullopt;
+				}
+				spdlog::warn("[FB] INI: FBMorph ignoring unknown tween field '{}' (token '{}')", key, std::string(tok));
+			}
+		}
+
 		return out;
 	}
+
 
 	static std::optional<FB::TimedCommand> ParseCommand(
 		float t,
@@ -333,6 +429,8 @@ namespace
 				c.target = dest;
 				c.morphName = m->morphName;  // OWNED std::string
 				c.delta = m->delta;
+				c.tweenSeconds = m->tweenSeconds;
+				c.tweenCurve = m->tweenCurve;
 				return c;
 			}
 
@@ -573,7 +671,21 @@ namespace
 
 					if (auto cmd = ParseCommand(*t, cmdTok, activeFBSection->who, newCfg.dbg.strictIni, g_resolver)) {
 						newCfg.timelines[activeFBSection->timeline].push_back(*cmd);
+
+						// TODO(TweenRefactor): Phase 3 Step 5 - log tween parsing with timeline context
+						if (newCfg.dbg.logIni &&
+							cmd->kind == FB::CommandKind::kMorph &&
+							cmd->tweenSeconds > 0.0f) {
+							spdlog::info(
+								"[FB] INI: tween parsed timeline='{}' who={} morph='{}' delta={} tweenSeconds={} curve=linear",
+								activeFBSection->timeline,
+								(activeFBSection->who == FB::TargetKind::kCaster ? "Caster" : "Target"),
+								cmd->morphName,
+								cmd->delta,
+								cmd->tweenSeconds);
+						}
 					}
+
 				}
 			}
 		}

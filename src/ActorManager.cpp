@@ -160,6 +160,11 @@ namespace FB::ActorManager
         }
     }
 
+    void FB::ActorManager::Update(float /*dtSeconds*/)
+    {
+        // Phase 4/5: intentionally empty (no behavior change yet)
+    }
+
     void CancelAndReset(
         RE::ActorHandle caster,
         std::uint32_t casterFormID,

@@ -21,6 +21,12 @@ namespace FB
         kMorph
     };
 
+    // TODO(TweenRefactor): Phase 2 - data model fields are added but not used yet.
+    enum class TweenCurve
+    {
+        kLinear
+    };
+ 
     struct TimedCommand
     {
         CommandKind kind{ CommandKind::kScale };
@@ -34,6 +40,12 @@ namespace FB
         // Morph payload (valid when kind==kMorph)
         std::string morphName{};   // IMPORTANT: own the string (no dangling string_view)
         float       delta{ 0.0f }; // delta-only (add/subtract)
+
+        // Tween payload (optional; used only when kind==kMorph)
+// tweenSeconds = total duration over which 'delta' is applied (delta is distributed over time).
+        float tweenSeconds{ 0.0f };
+        TweenCurve tweenCurve{ TweenCurve::kLinear };
+
     };
 }
 
@@ -45,6 +57,10 @@ namespace FB::ActorManager
         std::uint32_t casterFormID,
         std::vector<FB::TimedCommand> commands,
         bool logOps);
+
+    // TODO(TweenRefactor): Phase 4/5 - deterministic tick entry point (game-thread pump calls this)
+    void Update(float dtSeconds);
+
 
     // Cancel pending work, reset touched scales, and optionally clear morph keys.
     void CancelAndReset(

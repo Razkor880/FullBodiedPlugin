@@ -7,6 +7,7 @@
 
 #include "AnimEventListener.h"
 #include "AnimationEvents.h"
+#include "PlayerUpdateHook.h"
 
 #include "RE/Skyrim.h"
 #include "SKSE/SKSE.h"
@@ -64,6 +65,9 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 
 	spdlog::info("FullBodiedPlugin loaded");
 
+	SKSE::AllocTrampoline(64);
+
+
 	// Don't register to the player here: during SKSEPluginLoad the player/graphs
 	// are often not ready yet. Use MessagingInterface events instead.
 	if (auto* messaging = SKSE::GetMessagingInterface()) {
@@ -74,10 +78,15 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 
 			switch (msg->type) {
 			case SKSE::MessagingInterface::kDataLoaded:
+				RegisterSinksToPlayer();
+				FB::Hooks::InstallPlayerUpdateHook();
+				break;
+
 			case SKSE::MessagingInterface::kNewGame:
 			case SKSE::MessagingInterface::kPostLoadGame:
 				RegisterSinksToPlayer();
 				break;
+
 
 			default:
 				break;
@@ -90,3 +99,5 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 
 	return true;
 }
+
+
