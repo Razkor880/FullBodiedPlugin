@@ -75,18 +75,24 @@ Internal parsing may evolve, but **the external INI grammar must remain stable o
 - Does **not** parse parameters
 - Does **not** apply effects
 
+### PlayerUpdateHook
+- Deterministic per-frame vfunc hook
+- Multiple commands can fire per frame, order preserved
+- Cancellation mid-timeline is safe and immediate
+
 ### AnimationEvents
 - Interprets raw event payloads
 - Normalizes event names and parameters
 - Produces structured internal events
 
 ### ActorManager
+- Runtime authority
 - Resolves actor roles (caster, target, paired participants)
 - Tracks active animation participants
 - Owns actor-scoped state
 
 ### FBConfig
-- Loads and validates INI configuration
+- Sole owner of parsing
 - Provides timelines and tunables
 - Owns no runtime state
 
