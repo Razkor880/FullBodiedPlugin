@@ -2,6 +2,7 @@
 
 #include "FBScaler.h"
 #include "FBMorph.h"
+#include "FBHide.h"
 
 #include <spdlog/spdlog.h>
 
@@ -209,6 +210,14 @@ namespace
         MarkTouchedMorph(casterFormID, cmd.target);
     }
 
+    static void ExecuteHide(RE::ActorHandle actor, const FB::TimedCommand& cmd, bool logOps)
+    {
+        if (!actor) {
+            return;
+        }
+        FB::Hide::ApplyHide(actor, cmd.hide, logOps);
+    }
+
     static void ScheduleMorphTween(const ActiveTimeline& tl, const FB::TimedCommand& cmd)
     {
         RE::ActorHandle actor = ResolveActor(tl, cmd.target);
@@ -325,6 +334,12 @@ namespace FB::ActorManager
                 if (cmd.kind == FB::CommandKind::kScale) {
                     ExecuteScale(tl.casterFormID, actorHandle, cmd, tl.logOps);
                 }
+
+                else if (cmd.kind == FB::CommandKind::kHide) {
+                    const auto actorHandle = ResolveActor(tl, cmd.target);
+                    ExecuteHide(actorHandle, cmd, tl.logOps);
+                }
+
                 else if (cmd.kind == FB::CommandKind::kMorph) {
 
                     // TODO(TweenRefactor Phase 9): runtime currently supports LINEAR tween curves only.
@@ -447,6 +462,14 @@ namespace FB::ActorManager
 
         if (snap.lastTarget && resetMorphTarget) {
             FB::Morph::ResetAllForActor(snap.lastTarget, logOps);
+        }
+
+        // NEW: hide reset (both participants)
+        if (caster) {
+            FB::Hide::ResetActor(caster, logOps);
+        }
+        if (snap.lastTarget) {
+            FB::Hide::ResetActor(snap.lastTarget, logOps);
         }
 
         if (logOps) {

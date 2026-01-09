@@ -19,6 +19,7 @@ namespace FB
     {
         kScale,
         kMorph
+        kHide
     };
 
     // TODO(TweenRefactor): Phase 2 - data model fields are added but not used yet.
@@ -46,6 +47,7 @@ namespace FB
         float tweenSeconds{ 0.0f };
         TweenCurve tweenCurve{ TweenCurve::kLinear };
 
+        bool hide{ false };
     };
 }
 
