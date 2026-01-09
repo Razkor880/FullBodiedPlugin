@@ -1,1 +1,152 @@
+====================================
+FULL CHECKLIST (PLAIN TEXT VERSION)
+====================================
 
+PHASE 0 — CONTEXT + CONSTRAINTS
+
+Current baseline is stable and working using INI → Config → Timeline → ActorManager → MorphBridge → NiOverride.
+
+Mod already supports node scaling, morph deltas, sticky behavior.
+
+No HKX parsing layer yet; no parsing changes should break current INI flow.
+
+Tweening, curves, and optional durations are new.
+
+Visibility and face morph modules deferred until later.
+
+Keep code readable and reversible.
+
+Avoid timeline-format churn until HKX adapter exists.
+
+Do not invent new data structures unless strictly necessary.
+
+PHASE 1 — DATA MODEL (MINIMAL)
+
+Extend TimedCommand with the following new fields:
+morphName: string (existing)
+delta: float (existing)
+tweenSeconds: float (optional, default = 0.0 = instant)
+tweenCurve: enum or string (optional, default = linear)
+
+No change to Timeline storage type (vector<TimedCommand>).
+
+No change to sticky semantics.
+
+Do NOT introduce variant types yet (node/morph/visibility/etc) — keep morph-only model for now.
+
+PHASE 2 — INI LOADER (MINIMAL DELTAS)
+
+Modify parser to detect extended syntax without breaking old syntax.
+
+Syntax example:
+time key(delta tweenSeconds=1.5 curve=linear)
+
+Required behaviors:
+
+If tweenSeconds field missing → set tweenSeconds=0.0
+
+If curve missing → set tweenCurve=linear
+
+Reject malformed extended syntax only if bStrictIni=true
+
+Print helpful log messages when extended fields are parsed.
+
+No redesign of EventMap or TimelineMap.
+
+PHASE 3 — CORE ENGINE (ACTORMANAGER) TWEEN PIPE
+
+Do NOT build global scheduler rewrite.
+
+Add a small “per-actor morph tween buffer”, e.g. map<ActorHandle, vector<MorphTween>>.
+
+On command dispatch:
+
+If tweenSeconds == 0 → apply instantly (current path).
+
+If tweenSeconds > 0 → create tween entry and schedule interpolation across ticks.
+
+Ticks:
+
+Use existing Tick frequency (do NOT add a new thread or scheduler).
+
+Tween resolution is tied to existing timeline tick rate.
+
+Apply morph increments via MorphBridge.
+
+At tween completion:
+
+MarkSticky behavior still applies.
+
+Do not change sticky reset logic.
+
+PHASE 4 — EVENT FLOW COMPATIBILITY
+
+Keep existing call graph intact:
+INI → FBConfig → ActorManager → Morph → Bridge → NiOverride
+
+Do NOT modify AnimationEvents.cpp beyond:
+
+recognizing StartTimeline
+
+recognizing sticky resets
+
+optional future HKX injection entry point (stub only)
+
+PHASE 5 — HKX LAYER (FUTURE STUB ONLY)
+
+Add a placeholder abstraction:
+struct TimelineProvider {
+virtual Optional<Timeline> GetTimelineForEvent(string eventName);
+};
+
+Current implementation:
+IniTimelineProvider
+
+Future implementation:
+HkxTimelineProvider
+
+Composite Provider:
+FirstTryIniThenHkx OR merged timeline
+
+Do NOT actually parse HKX yet; no binary loader needed.
+
+This step should NOT break compilation.
+
+PHASE 6 — RESET + CLEANUP BEHAVIOR
+
+Sticky semantics unchanged.
+
+Reset behavior unchanged (PairEnd / PairedStop).
+
+Do not touch visibility reset or node reset.
+
+Morph reset continues to zero or prior baseline (existing behavior).
+
+PHASE 7 — LOGGING + DEBUG
+
+Add logs for:
+loaded tweenSeconds
+applied tween increments
+completed tween
+
+Do not spam logs; respect bLogOps and bLogTimelineStart.
+
+PHASE 8 — GPT-TO-GPT COLLABORATION NOTES
+
+Summaries matter: next GPT should ask for a short summary every ~20 turns.
+
+Be willing to re-request expired code uploads (happens after tool state clears).
+
+Keep diffs scoped and reversible per phase — do not shotgun refactor.
+
+Ask user when assumptions exceed 2–3 edge cases (Skyrim modding has weird edge cases).
+
+Keep memory usage light: don’t store entire repos or massive context; store deltas + specs.
+
+Re-state invariants periodically ("actor morphs must never break paired animations").
+
+Pay is nonexistent but the work is honorable and for modding glory.
+
+====================================
+END CHECKLIST
+====================================
