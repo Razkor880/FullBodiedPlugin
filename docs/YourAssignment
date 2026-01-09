@@ -113,6 +113,13 @@ If not advanced, skip Update but still reschedule PumpOnce
 
 4.5 Call StartPump() from existing plugin initialization paths (DataLoaded/NewGame/PostLoadGame), with a guard to prevent multiple starts.
 
+INVARIANT:
+At most one update pump may be active.
+
+StartPump() must be guarded so it cannot schedule multiple PumpOnce loops.
+PumpOnce must ensure that at most one instance is queued or executing at any time
+(e.g., via a simple scheduled/inFlight flag).
+
 Checkpoint E:
 Build succeeds. Behavior unchanged. Pump runs safely without busy-looping.
 
@@ -129,7 +136,16 @@ dt must come from RE (not steady_clock, not fixed dt).
 
 dt <= 0 or unchanged frame marker skips Update.
 
-5.3 Optionally clamp dt conservatively for pathological spikes (loading).
+5.3 Clamp or skip pathological dt values.
+
+If dt is excessively large (e.g., during loading, pause, or hitch),
+either clamp dt conservatively or skip Update for that frame.
+
+This is required to prevent:
+- instant completion of tweens
+- large command bursts
+- unstable catch-up behavior
+
 
 5.4 Integrate dt into PumpOnce and pass into ActorManager::Update(dt).
 
@@ -196,6 +212,13 @@ Scales and morphs reset as before
 
 7.3 Remove or disable old thread-per-command timing code cleanly.
 
+TIMELINE SEMANTICS:
+
+If elapsedSeconds advances past multiple scheduled commands in a single Update(dt),
+all due commands must execute in correct order during that Update.
+
+Do not limit execution to one command per frame.
+
 Checkpoint H:
 Build succeeds.
 
@@ -231,11 +254,20 @@ Token snapshot
 
 8.3 When executing morph commands:
 
+TWEEN REPLACEMENT RULE:
+
+At most one active tween may exist per (actor, morph key).
+
+Scheduling a new tween for the same (actor, morph key)
+must replace the existing tween (not accumulate).
+
 tweenSeconds <= 0: instant AddDelta (unchanged)
 
 tweenSeconds > 0: schedule or replace ActiveTween
 
 8.4 In ActorManager::Update(dt):
+
+Token validity must be checked before applying any morph delta.
 
 Advance ActiveTweens:
 
