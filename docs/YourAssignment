@@ -1,125 +1,278 @@
-# YourAssignment
+YOURASSIGNMENT
 
-This document contains **explicit, temporary instructions** for the current task.
+This document contains explicit, temporary instructions for the current task.
 
 It is intentionally task-scoped and non-canonical.
 
----
-
-## Authority Order
+AUTHORITY ORDER
 
 If instructions conflict, resolve them in this order:
 
-1. `docs/architecture` (canonical once stable)
-2. This document (`YourAssignment`)
-3. `docs/design_notes`
+docs/architecture (canonical once stable)
 
-This document may override defaults and workflows,  
-but it does **not** redefine architecture or external contracts.
+This document (YourAssignment)
 
----
+docs/design_notes
 
-## Executor Role Definition
+This document may override defaults and workflows,
+but it does not redefine architecture or external contracts.
 
-You are an **executor GPT**.
+EXECUTOR ROLE DEFINITION
+
+You are an executor GPT.
 
 Your job is to:
-- Implement or refactor code exactly as instructed
-- Preserve existing behavior unless explicitly told otherwise
-- Keep changes scoped, readable, and reversible
-- Ask before making architectural changes
 
-You must **not**:
-- Invent new systems beyond the scope described here
-- Change external contracts (INI grammar, event names, semantics)
-- Perform speculative refactors
-- “Improve” unrelated code while you are here
+Implement or refactor code exactly as instructed
 
-If unsure: **stop and ask**.
+Preserve existing behavior unless explicitly told otherwise
 
----
+Keep changes scoped, readable, and reversible
 
-## Task Goal (High-Level)
+Ask before making architectural changes
 
-Introduce **optional tweening support for morph timelines** while preserving the existing INI-driven pipeline, call graph, and behavior.
+You must not:
+
+Invent new systems beyond the scope described here
+
+Change external contracts (INI grammar, event names, semantics)
+
+Perform speculative refactors
+
+Improve unrelated code while you are here
+
+If unsure, stop and ask.
+
+TASK GOAL (HIGH LEVEL)
+
+Introduce optional tweening support for morph timelines while preserving the existing INI-driven pipeline, call graph, and behavior.
 
 This work must:
-- Be fully backward-compatible
-- Avoid data model churn
-- Prepare (but not implement) future HKX timeline support
 
----
+Be fully backward-compatible
 
-## Non-Goals
+Avoid data model churn
 
-- No HKX parsing or binary loaders
-- No visibility or face morph systems
-- No scheduler or threading rewrites
-- No variant-based command system
-- No INI format redesign
-- No behavior graph changes beyond existing entry points
+Prepare (but not implement) future HKX timeline support
 
----
+NON-GOALS
 
-## Stop Conditions (Ask Before Proceeding)
+No HKX parsing or binary loaders
+
+No visibility or face morph systems
+
+No scheduler or threading rewrites
+
+No variant-based command system
+
+No INI format redesign
+
+No behavior graph changes beyond existing entry points
+
+STOP CONDITIONS (ASK BEFORE PROCEEDING)
 
 Stop and ask the user if:
-- A change would affect INI grammar or ordering guarantees
-- A new data structure seems unavoidable
-- Tween logic interacts unexpectedly with paired animations
-- Skeleton differences introduce ambiguous behavior
-- More than 2–3 Skyrim-specific edge cases appear
 
----
+A change would affect INI grammar or ordering guarantees
 
-====================================
+A new data structure seems unavoidable
+
+Tween logic interacts unexpectedly with paired animations
+
+Skeleton differences introduce ambiguous behavior
+
+More than 2-3 Skyrim-specific edge cases appear
+
+================================================================
 FULL CHECKLIST (EXECUTION PLAN)
-====================================
 
-### PHASE 0 — CONTEXT + CONSTRAINTS
+PHASE 0 - CONTEXT + CONSTRAINTS
 
-- Current baseline is stable and working using:
-  INI → FBConfig → Timeline → ActorManager → MorphBridge → NiOverride
+Current baseline is stable and working using:
+INI -> FBConfig -> Timeline -> ActorManager -> MorphBridge -> NiOverride
 
-- Mod already supports:
-  - node scaling
-  - morph deltas
-  - sticky behavior
+Mod already supports:
 
-- No HKX parsing layer exists yet  
-  → no changes should break current INI flow
+node scaling
 
-- Tweening, curves, and optional durations are **new**
+morph deltas
 
-- Visibility and face morph modules are deferred
+sticky behavior
 
-- Keep code readable and reversible
+No HKX parsing layer exists yet
+-> no changes should break current INI flow
 
-- Avoid timeline-format churn until HKX adapter exists
+Tweening, curves, and optional durations are new
 
-- Do not invent new data structures unless strictly necessary
+Visibility and face morph modules are deferred
 
----
+Keep code readable and reversible
 
-### PHASE 1 — DATA MODEL (MINIMAL)
+Avoid timeline-format churn until HKX adapter exists
 
-Extend `TimedCommand` with the following fields:
+Do not invent new data structures unless strictly necessary
 
-- `morphName : string` (existing)
-- `delta : float` (existing)
-- `tweenSeconds : float` (optional, default = 0.0 = instant)
-- `tweenCurve : enum or string` (optional, default = linear)
+PHASE 1 - DATA MODEL (MINIMAL)
+
+Extend TimedCommand with the following fields:
+
+morphName : string (existing)
+
+delta : float (existing)
+
+tweenSeconds : float (optional, default = 0.0 = instant)
+
+tweenCurve : enum or string (optional, default = linear)
 
 Constraints:
-- No change to `Timeline` storage type (`vector<TimedCommand>`)
-- No change to sticky semantics
-- Do **not** introduce variant command types
-- Morph-only model remains in place for now
 
----
+No change to Timeline storage type (vector<TimedCommand>)
 
-### PHASE 2 — INI LOADER (MINIMAL DELTAS)
+No change to sticky semantics
 
-Modify parser to detect extended syntax **without breaking old syntax**.
+Do not introduce variant command types
 
-Example:
+Morph-only model remains in place for now
+
+PHASE 2 - INI LOADER (MINIMAL DELTAS)
+
+Modify parser to detect extended syntax without breaking old syntax.
+
+Syntax example:
+time key(delta tweenSeconds=1.5 curve=linear)
+
+Required behaviors:
+
+If tweenSeconds missing, default to 0.0
+
+If curve missing, default to linear
+
+Reject malformed extended syntax only if bStrictIni=true
+
+Print helpful logs when extended fields are parsed
+
+Constraints:
+
+No redesign of EventMap or TimelineMap
+
+Old INI files must load unchanged
+
+PHASE 3 - CORE ENGINE (ACTORMANAGER) TWEEN PIPE
+
+Do not build a global scheduler rewrite
+
+Add a small per-actor morph tween buffer
+Example: map<ActorHandle, vector<MorphTween>>
+
+On command dispatch:
+
+If tweenSeconds == 0, apply instantly (existing path)
+
+If tweenSeconds > 0, create tween entry and schedule interpolation
+
+Ticks:
+
+Use existing tick frequency
+
+Do not add threads or schedulers
+
+Tween resolution is tied to existing timeline tick rate
+
+At tween completion:
+
+Sticky semantics still apply
+
+Do not modify sticky reset logic
+
+PHASE 4 - EVENT FLOW COMPATIBILITY
+
+Keep existing call graph intact:
+
+INI -> FBConfig -> ActorManager -> Morph -> Bridge -> NiOverride
+
+Do not modify AnimationEvents.cpp beyond:
+
+recognizing StartTimeline
+
+recognizing sticky resets
+
+adding an optional future HKX entry point (stub only)
+
+PHASE 5 - HKX LAYER (FUTURE STUB ONLY)
+
+Introduce placeholder abstraction:
+
+struct TimelineProvider {
+virtual Optional<Timeline> GetTimelineForEvent(string eventName);
+};
+
+Implementations:
+
+IniTimelineProvider (current)
+
+HkxTimelineProvider (future)
+
+Composition options:
+
+First try INI, then HKX
+
+Or merged timelines (no behavior yet)
+
+Constraints:
+
+Do not parse HKX
+
+No binary loader
+
+Must compile cleanly
+
+Must not affect runtime behavior
+
+PHASE 6 - RESET + CLEANUP BEHAVIOR
+
+Sticky semantics unchanged
+
+Reset behavior unchanged (PairEnd / PairedStop)
+
+Do not touch visibility reset or node reset
+
+Morph reset continues to zero or prior baseline (existing behavior)
+
+PHASE 7 - LOGGING + DEBUG
+
+Add logs for:
+
+loaded tweenSeconds
+
+applied tween increments
+
+completed tween
+
+Constraints:
+
+Respect bLogOps
+
+Respect bLogTimelineStart
+
+Do not spam logs
+
+PHASE 8 - GPT-TO-GPT COLLABORATION NOTES
+
+Summaries matter: ask for a short summary every ~20 turns
+
+Be willing to re-request expired code uploads
+
+Keep diffs scoped and reversible per phase
+
+Ask user when assumptions exceed 2-3 edge cases
+
+Keep memory usage light (store deltas + specs, not whole repos)
+
+Re-state invariants periodically
+Example: actor morphs must never break paired animations
+
+Pay is nonexistent, but the work is honorable and for modding glory.
+
+================================================================
+END CHECKLIST
+
