@@ -1,119 +1,98 @@
 #include "FBUpdatePump.h"
 
-#include "ActorManager.h"   // FB::ActorManager::Update
-#include "RE/B/BSTimer.h"
+#include "ActorManager.h"
+#include "AnimationEvents.h"  // RegisterAnimationEventSink
+
+#include "RE/Skyrim.h"
+#include "REL/Relocation.h"
 #include "SKSE/SKSE.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 
 #include <spdlog/spdlog.h>
-#include "REL/Relocation.h"
-
 
 namespace
 {
-    std::atomic_bool g_running{ false };
-    std::atomic_bool g_scheduled{ false };
+	// Enable/disable the pump without uninstalling the vfunc hook.
+	std::atomic_bool g_running{ false };
 
-    // Frame-advance guard (BSTimer performance counter)
-    std::atomic<std::uint64_t> g_lastPerf{ 0 };
+	// Ensure we only install the hook once.
+	std::atomic_bool g_installed{ false };
 
-    // Conservative hitch guard: skip or clamp pathological dt
-    constexpr float kMaxDtSeconds = 0.25f;
+	// One-time successful registration flag (retry until true).
+	bool g_animSinkRegistered = false;
 
-    void PumpOnce();
+	// Pathological dt clamp (keeps timelines sane through hitches/loading).
+	constexpr float kMaxDtSeconds = 0.25f;
 
-    void SchedulePump()
-    {
-        if (!g_running.load(std::memory_order_acquire)) {
-            return;
-        }
+	struct PlayerUpdateHook
+	{
+		// Canonical vfunc index (your established value).
+		static constexpr std::uint32_t kVFuncIndex = 0xAD;
 
-        bool expected = false;
-        if (!g_scheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            // already scheduled/in-flight
-            return;
-        }
+		static void thunk(RE::PlayerCharacter* a_this, float a_delta)
+		{
+			// Call original first (per requirement).
+			func(a_this, a_delta);
 
-        auto task = []() {
-            PumpOnce();
-            };
+			// If not running, do nothing (but keep hook installed).
+			if (!g_running.load(std::memory_order_acquire)) {
+				return;
+			}
 
-        SKSE::GetTaskInterface()->AddTask(task);
-    }
-    static RE::BSTimer* GetBSTimer() noexcept
-    {
-        // CommonLibSSE-NG provides this relocation for BSTimer singleton.
-        // Your vcpkg header lacks GetSingleton(), so we replicate it locally.
-        REL::Relocation<RE::BSTimer*> singleton{ RELOCATION_ID(523657, 410196) };
-        return singleton.get();
-    }
+			// Retry animation sink registration until graphs exist.
+			if (!g_animSinkRegistered) {
+				if (RegisterAnimationEventSink(a_this)) {
+					g_animSinkRegistered = true;
+					spdlog::info("[FB] Animation event sink registered via PlayerCharacter::Update");
+				}
+			}
 
-    void PumpOnce()
-    {
-        // Mark as no longer scheduled; we'll schedule again at the end.
-        g_scheduled.store(false, std::memory_order_release);
+			// Safety gates.
+			if (a_delta <= 0.0f) {
+				return;
+			}
 
-        if (!g_running.load(std::memory_order_acquire)) {
-            return;
-        }
+			// Clamp dt defensively.
+			const float dt = std::min(a_delta, kMaxDtSeconds);
 
-        auto* timer = GetBSTimer();
+			FB::ActorManager::Update(dt);
+		}
 
-        if (!timer) {
-            // No timer yet; try again next tick.
-            SchedulePump();
-            return;
-        }
-
-        const std::uint64_t perf = timer->lastPerformanceCount;
-
-        // Busy-loop guard: only run Update when frame/time advances.
-        const std::uint64_t last = g_lastPerf.load(std::memory_order_acquire);
-        if (perf == last) {
-            SchedulePump();
-            return;
-        }
-        g_lastPerf.store(perf, std::memory_order_release);
-
-        float dt = timer->delta;
-        if (dt <= 0.0f) {
-            SchedulePump();
-            return;
-        }
-
-        // Required safety: clamp or skip pathological dt (loading/hitch/pause)
-        if (dt > kMaxDtSeconds) {
-            // Conservative: clamp instead of skipping so timelines still advance smoothly after hitches.
-            dt = kMaxDtSeconds;
-        }
-
-        FB::ActorManager::Update(dt);
-
-        // Reschedule
-        SchedulePump();
-    }
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
 }
 
 namespace FB::UpdatePump
 {
-    void Start()
-    {
-        bool expected = false;
-        if (!g_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            // already running
-            return;
-        }
+	void Install()
+	{
+		bool expected = false;
+		if (!g_installed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+			// Already installed.
+			return;
+		}
 
-        g_lastPerf.store(0, std::memory_order_release);
-        SchedulePump();
-        spdlog::info("[FB] UpdatePump started");
-    }
+		// Trampoline must exist before write_vfunc.
+		(void)SKSE::GetTrampoline();
 
-    void Stop()
-    {
-        g_running.store(false, std::memory_order_release);
-        spdlog::info("[FB] UpdatePump stopped");
-    }
+		REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
+		PlayerUpdateHook::func = vtbl.write_vfunc(PlayerUpdateHook::kVFuncIndex, PlayerUpdateHook::thunk);
+
+		spdlog::info("[FB] Hooked PlayerCharacter::Update(float) vfunc index 0x{:X}", PlayerUpdateHook::kVFuncIndex);
+	}
+
+	void Start()
+	{
+		g_running.store(true, std::memory_order_release);
+		spdlog::info("[FB] UpdatePump started");
+	}
+
+	void Stop()
+	{
+		g_running.store(false, std::memory_order_release);
+		spdlog::info("[FB] UpdatePump stopped");
+	}
 }

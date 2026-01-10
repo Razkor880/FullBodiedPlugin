@@ -7,7 +7,6 @@
 
 
 #include "AnimationEvents.h"
-#include "PlayerUpdateHook.h"
 #include "FBUpdatePump.h"
 
 #include "RE/Skyrim.h"
@@ -77,7 +76,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 			switch (msg->type) {
 			case SKSE::MessagingInterface::kDataLoaded:
 				RegisterSinksToPlayer();
-				FB::Hooks::InstallPlayerUpdateHook();
+				FB::UpdatePump::Install();
+				FB::UpdatePump::Start();
 				break;
 			case SKSE::MessagingInterface::kNewGame:
 			case SKSE::MessagingInterface::kPostLoadGame:
