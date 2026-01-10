@@ -1,4 +1,5 @@
 #include "PlayerUpdateHook.h"
+#include "AnimationEvents.h"
 
 #include "ActorManager.h"
 
@@ -12,6 +13,9 @@
 
 namespace
 {
+    bool g_animSinkRegistered = false;
+
+
     // Pathological dt clamp (required by checklist)
     constexpr float kMaxDtSeconds = 0.25f;
 
@@ -24,6 +28,12 @@ namespace
         {
             // Call original first (per requirement)
             func(a_this, a_delta);
+            if (!g_animSinkRegistered) {
+                if (RegisterAnimationEventSink(a_this)) {
+                    g_animSinkRegistered = true;
+                    spdlog::info("[FB] Animation event sink registered via PlayerCharacter::Update");
+                }
+            }
 
             // Safety gates
             if (a_delta <= 0.0f) {

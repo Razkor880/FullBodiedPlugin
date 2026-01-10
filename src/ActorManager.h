@@ -62,6 +62,7 @@ namespace FB::ActorManager
     void Update(float dtSeconds);
 
 
+
     // Cancel pending work, reset touched scales, and optionally clear morph keys.
     void CancelAndReset(
         RE::ActorHandle caster,

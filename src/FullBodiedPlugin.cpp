@@ -5,9 +5,10 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 
-#include "AnimEventListener.h"
+
 #include "AnimationEvents.h"
 #include "PlayerUpdateHook.h"
+#include "FBUpdatePump.h"
 
 #include "RE/Skyrim.h"
 #include "SKSE/SKSE.h"
@@ -44,17 +45,14 @@ namespace
 			return;
 		}
 
-		// Optional (but nice): parse INI once up front so the first event doesn't "pay" for it.
-		// This is the function we added in AnimationEvents.h / AnimationEvents.cpp.
-		LoadHeadScaleConfig();
-
-		RegisterAnimationEventSink(player);
-
-		// 2) Your debug/logger sink (prints tags you care about)
-		AnimEventListener::GetSingleton()->RegisterToPlayer();
-
-		spdlog::info("Registered animation sinks to player.");
+		if (RegisterAnimationEventSink(player)) {
+			spdlog::info("[FB] Registered animation sink to player.");
+		}
+		else {
+			spdlog::info("[FB] Player anim graph not ready yet; will retry via PlayerCharacter::Update.");
+		}
 	}
+
 }
 
 // CommonLibSSE-NG export macro (expands to exported SKSEPlugin_Load entry point)
@@ -81,11 +79,10 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 				RegisterSinksToPlayer();
 				FB::Hooks::InstallPlayerUpdateHook();
 				break;
-
 			case SKSE::MessagingInterface::kNewGame:
 			case SKSE::MessagingInterface::kPostLoadGame:
-				RegisterSinksToPlayer();
-				break;
+
+
 
 
 			default:

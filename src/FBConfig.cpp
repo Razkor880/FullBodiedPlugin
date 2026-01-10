@@ -561,7 +561,7 @@ namespace
 			// [General]
 			if (IEquals(currentSection, "General")) {
 				if (IEquals(key, "enableTimelines") ||
-					IEquals(key, "bEnableHeadScaleTimelines") ||
+					//IEquals(key, "bEnableHeadScaleTimelines") ||
 					IEquals(key, "bEnableTimelines")) {
 					newCfg.enableTimelines = ParseBool(val, newCfg.enableTimelines);
 				}
