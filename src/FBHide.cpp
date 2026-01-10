@@ -1,270 +1,217 @@
-#include "FBHide.h"
+//#include "FBHide.h"
 
-#include <spdlog/spdlog.h>
+#include <RE/N/NiNode.h>
+#include <RE/N/NiRTTI.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <mutex>
-#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-namespace
-{
-    struct ShapeKey
-    {
-        std::string shapeName;
-        std::string parentName;  // optional / best-effort
-
-        bool operator==(const ShapeKey& o) const noexcept
-        {
-            return shapeName == o.shapeName && parentName == o.parentName;
-        }
-    };
-
-    struct ShapeKeyHash
-    {
-        std::size_t operator()(const ShapeKey& k) const noexcept
-        {
-            std::size_t h1 = std::hash<std::string>{}(k.shapeName);
-            std::size_t h2 = std::hash<std::string>{}(k.parentName);
-            return h1 ^ (h2 + 0x9e3779b97f4a7c15ull + (h1 << 6) + (h1 >> 2));
-        }
-    };
-
-    struct ActorHideState
-    {
-        // baselineHidden = whether NiAVObject::Flag::kHidden was set when first touched
-        std::unordered_map<ShapeKey, bool, ShapeKeyHash> baselineHidden;
-    };
-
-    std::mutex g_mutex;
-    std::unordered_map<std::uint32_t, ActorHideState> g_state;  // keyed by actor FormID
-
-    struct ShapeVisit
-    {
-        RE::NiAVObject* obj{ nullptr };  // ephemeral, only valid during pass
-        ShapeKey key;
-    };
-
-    static bool IsRenderableGeometry(RE::NiAVObject* obj)
-    {
-        if (!obj) {
-            return false;
-        }
-
-        // Render geometry only:
-        // - BSTriShape is common
-        // - NiGeometry covers more
-        if (obj->As<RE::BSTriShape>()) {
-            return true;
-        }
-        if (obj->As<RE::NiGeometry>()) {
-            return true;
-        }
-
-        return false;
-    }
-
-    static void TraverseNode(RE::NiAVObject* obj, std::vector<ShapeVisit>& out)
-    {
-        if (!obj) {
-            return;
-        }
-
-        if (IsRenderableGeometry(obj)) {
-            ShapeVisit v;
-            v.obj = obj;
-            v.key.shapeName = obj->name.c_str();
-
-            if (obj->parent && obj->parent->name.c_str()) {
-                v.key.parentName = obj->parent->name.c_str();
-            }
-
-            out.push_back(std::move(v));
-            return;
-        }
-
-        if (auto node = obj->As<RE::NiNode>()) {
-            const auto& children = node->children;
-            for (const auto& ch : children) {
-                if (ch) {
-                    TraverseNode(ch.get(), out);
-                }
-            }
-        }
-    }
-
-    static std::vector<ShapeVisit> CollectShapes(RE::Actor* a)
-    {
-        std::vector<ShapeVisit> shapes;
-        if (!a) {
-            return shapes;
-        }
-
-        auto* root = a->Get3D();
-        if (!root) {
-            return shapes;
-        }
-
-        TraverseNode(root, shapes);
-        return shapes;
-    }
-
-    static bool GetHiddenFlag(RE::NiAVObject* obj)
-    {
-        auto& flags = obj->GetFlags();
-        return flags.any(RE::NiAVObject::Flag::kHidden);
-    }
-
-    static void SetHiddenFlag(RE::NiAVObject* obj, bool hidden)
-    {
-        auto& flags = obj->GetFlags();
-        if (hidden) {
-            flags.set(RE::NiAVObject::Flag::kHidden);
-        }
-        else {
-            flags.reset(RE::NiAVObject::Flag::kHidden);
-        }
-    }
-}
+#include <spdlog/spdlog.h>
 
 namespace FB::Hide
 {
-    void ApplyHide(RE::ActorHandle actor, bool hide, bool logOps)
-    {
-        if (!actor) {
-            return;
-        }
+	namespace
+	{
+		struct ActorHideState
+		{
+			// Baseline: whether object was hidden before we touched it
+			std::unordered_map<const RE::NiAVObject*, bool> baselineHiddenByObj;
+			// Touched list for reset iteration
+			std::vector<const RE::NiAVObject*> touched;
 
-        auto a = actor.get();
-        if (!a) {
-            return;
-        }
+			void Clear()
+			{
+				baselineHiddenByObj.clear();
+				touched.clear();
+			}
+		};
 
-        const auto actorFormID = a->GetFormID();
+		std::mutex g_mutex;
+		std::unordered_map<std::uint32_t, ActorHideState> g_stateByActorID;
 
-        // Collect shapes (ephemeral pointers only)
-        auto shapes = CollectShapes(a.get());
-        if (shapes.empty()) {
-            if (logOps) {
-                spdlog::info("[FBHide] ApplyHide: actor='{}' has no 3D/shapes (noop)", a->GetName());
-            }
-            return;
-        }
+		static bool IsRenderableGeometry(RE::NiAVObject* a_obj)
+		{
+			if (!a_obj) {
+				return false;
+			}
 
-        std::size_t touched = 0;
+			if (netimmerse_cast<RE::BSTriShape*>(a_obj)) {
+				return true;
+			}
+			if (netimmerse_cast<RE::NiGeometry*>(a_obj)) {
+				return true;
+			}
 
-        {
-            std::lock_guard _{ g_mutex };
-            auto& st = g_state[actorFormID];
+			return false;
+		}
 
-            for (auto& s : shapes) {
-                if (!s.obj) {
-                    continue;
-                }
+		static void TraverseNode(RE::NiAVObject* a_obj, std::vector<RE::NiAVObject*>& a_out)
+		{
+			if (!a_obj) {
+				return;
+			}
 
-                // Capture baseline once per shape key
-                if (!st.baselineHidden.contains(s.key)) {
-                    st.baselineHidden.emplace(s.key, GetHiddenFlag(s.obj));
-                }
+			if (IsRenderableGeometry(a_obj)) {
+				a_out.push_back(a_obj);
+			}
 
-                if (hide) {
-                    SetHiddenFlag(s.obj, true);
-                }
-                else {
-                    // best-effort restore baseline (do not clear state)
-                    const bool baseline = st.baselineHidden[s.key];
-                    SetHiddenFlag(s.obj, baseline);
-                }
+			if (auto* node = netimmerse_cast<RE::NiNode*>(a_obj)) {
+				// IMPORTANT: with ENABLE_SKYRIM_VR=1, NiNode does not expose `children`.
+				// Use GetChildren() which CommonLib provides across builds.
+				for (auto& ch : node->GetChildren()) {
+					if (ch) {
+						TraverseNode(ch.get(), a_out);
+					}
+				}
+			}
+		}
 
-                ++touched;
-            }
-        }
+		static void SetHiddenFlag(RE::NiAVObject* a_obj, bool a_hidden)
+		{
+			if (!a_obj) {
+				return;
+			}
 
-        if (logOps) {
-            spdlog::info("[FBHide] ApplyHide: actor='{}' hide={} shapes={}",
-                a->GetName(), hide, touched);
-        }
-    }
+			// GetFlags() is the CommonLib-safe accessor across builds (incl. VR).
+			auto& flags = a_obj->GetFlags();
 
-    void ResetActor(RE::ActorHandle actor, bool logOps)
-    {
-        std::uint32_t actorFormID = 0;
-        std::string actorName = "<null>";
+			if (a_hidden) {
+				flags.set(RE::NiAVObject::Flag::kHidden);
+			}
+			else {
+				flags.reset(RE::NiAVObject::Flag::kHidden);
+			}
+		}
 
-        RE::Actor* aPtr = nullptr;
-        if (actor) {
-            auto a = actor.get();
-            if (a) {
-                aPtr = a.get();
-                actorFormID = aPtr->GetFormID();
-                actorName = aPtr->GetName();
-            }
-        }
+		static bool GetHiddenFlag(RE::NiAVObject* a_obj)
+		{
+			if (!a_obj) {
+				return false;
+			}
 
-        if (actorFormID == 0) {
-            return;
-        }
+			return a_obj->GetFlags().all(RE::NiAVObject::Flag::kHidden);
+		}
 
-        // Snapshot baseline keys/state, then remove from map so we always clear state
-        ActorHideState snapshot;
-        {
-            std::lock_guard _{ g_mutex };
-            auto it = g_state.find(actorFormID);
-            if (it == g_state.end()) {
-                return;
-            }
-            snapshot = std::move(it->second);
-            g_state.erase(it);
-        }
 
-        if (!aPtr) {
-            // Can't traverse; state already cleared
-            if (logOps) {
-                spdlog::info("[FBHide] ResetActor: actor=<missing> (state cleared, restore skipped)");
-            }
-            return;
-        }
+		static std::uint32_t GetActorID(const RE::ActorHandle& a_handle)
+		{
+			const auto ap = a_handle.get();   // NiPointer<Actor>
+			auto* actor = ap.get();           // Actor*
+			if (!actor) {
+				return 0;
+			}
+			return actor->GetFormID();
+		}
 
-        auto shapes = CollectShapes(aPtr);
-        if (shapes.empty()) {
-            // 3D missing; state already cleared, rely on default visible on reload
-            if (logOps) {
-                spdlog::info("[FBHide] ResetActor: actor='{}' has no 3D (state cleared, restore skipped)", actorName);
-            }
-            return;
-        }
+		static RE::NiAVObject* GetRoot3D(const RE::ActorHandle& a_handle)
+		{
+			const auto ap = a_handle.get();
+			auto* actor = ap.get();
+			if (!actor) {
+				return nullptr;
+			}
+			return actor->Get3D();
+		}
+	}
 
-        std::size_t restored = 0;
+	void ApplyHide(RE::ActorHandle a_actor, bool a_hide, bool logOps)
+	{
+		const auto actorID = GetActorID(a_actor);
+		if (actorID == 0) {
+			return;
+		}
 
-        // Best-effort restore: match by (shape name, parent name)
-        for (auto& s : shapes) {
-            if (!s.obj) {
-                continue;
-            }
+		auto* root = GetRoot3D(a_actor);
+		if (!root) {
+			return;
+		}
 
-            auto it = snapshot.baselineHidden.find(s.key);
-            if (it == snapshot.baselineHidden.end()) {
-                continue;
-            }
+		std::vector<RE::NiAVObject*> geoms;
+		geoms.reserve(256);
+		TraverseNode(root, geoms);
 
-            SetHiddenFlag(s.obj, it->second);
-            ++restored;
-        }
+		std::scoped_lock lk(g_mutex);
+		auto& state = g_stateByActorID[actorID];
 
-        if (logOps) {
-            spdlog::info("[FBHide] ResetActor: actor='{}' restoredShapes={}", actorName, restored);
-        }
-    }
+		for (auto* obj : geoms) {
+			if (!obj) {
+				continue;
+			}
+
+			// Capture baseline once per object per actor.
+			if (state.baselineHiddenByObj.find(obj) == state.baselineHiddenByObj.end()) {
+				const bool baseline = GetHiddenFlag(obj);
+				state.baselineHiddenByObj.emplace(obj, baseline);
+				state.touched.push_back(obj);
+			}
+
+			// hide=true: force hidden; hide=false: restore baseline
+			if (a_hide) {
+				SetHiddenFlag(obj, true);
+			}
+			else {
+				const bool baseline = state.baselineHiddenByObj[obj];
+				SetHiddenFlag(obj, baseline);
+			}
+		}
+
+		if (logOps) {
+			spdlog::info("[FBHide] ApplyHide: actor {:08X} hide={} touchedNow={}", actorID, a_hide, geoms.size());
+		}
+	}
+
+	void ResetActor(RE::ActorHandle a_actor, bool logOps)
+	{
+		const auto actorID = GetActorID(a_actor);
+		if (actorID == 0) {
+			return;
+		}
+
+		auto* root = GetRoot3D(a_actor);
+
+		std::scoped_lock lk(g_mutex);
+		auto it = g_stateByActorID.find(actorID);
+		if (it == g_stateByActorID.end()) {
+			return;
+		}
+
+		auto& state = it->second;
+
+		if (root) {
+			for (auto* obj : state.touched) {
+				auto jt = state.baselineHiddenByObj.find(obj);
+				if (jt != state.baselineHiddenByObj.end()) {
+					SetHiddenFlag(const_cast<RE::NiAVObject*>(obj), jt->second);
+				}
+			}
+		}
+		else {
+			if (logOps) {
+				spdlog::info("[FBHide] ResetActor: actor {:08X} missing 3D; restore skipped, state cleared", actorID);
+			}
+		}
+
+		state.Clear();
+		g_stateByActorID.erase(it);
+
+		if (logOps) {
+			spdlog::info("[FBHide] ResetActor: actor {:08X} done", actorID);
+		}
+	}
 
 #ifndef NDEBUG
-    void ResetAll(bool logOps)
-    {
-        std::lock_guard _{ g_mutex };
-        g_state.clear();
-        if (logOps) {
-            spdlog::info("[FBHide] ResetAll: cleared all hide state");
-        }
-    }
+	void ResetAll(bool logOps)
+	{
+		std::scoped_lock lk(g_mutex);
+		g_stateByActorID.clear();
+
+		if (logOps) {
+			spdlog::info("[FBHide] ResetAll: cleared all hide state");
+		}
+	}
 #endif
 }

@@ -261,51 +261,6 @@ namespace
 		FB::TweenCurve tweenCurve{ FB::TweenCurve::kLinear };
 	};
 
-	struct ParsedHide
-	{
-		bool hide{ false };
-	};
-
-	static std::optional<ParsedHide> TryParseHideToken(std::string_view tok, bool strictIni)
-	{
-		const std::string_view prefix = "FBHide";
-		if (tok.rfind(prefix, 0) != 0) {
-			return std::nullopt;
-		}
-
-		const size_t open = tok.find('(');
-		const size_t close = tok.rfind(')');
-
-		if (open == std::string_view::npos || close == std::string_view::npos ||
-			close <= open + 1 || close != tok.size() - 1) {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: bad call syntax '{}'", std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		std::string arg{ tok.substr(open + 1, close - open - 1) };
-		TrimInPlace(arg);
-		arg = ToLower(std::move(arg));
-
-		bool hide = false;
-		if (arg == "true" || arg == "1") {
-			hide = true;
-		}
-		else if (arg == "false" || arg == "0") {
-			hide = false;
-		}
-		else {
-			if (strictIni) {
-				spdlog::warn("[FB] INI: FBHide arg must be true/false/1/0, got '{}' in '{}'", arg, std::string(tok));
-			}
-			return std::nullopt;
-		}
-
-		ParsedHide out;
-		out.hide = hide;
-		return out;
-	}
 
 
 	static std::string ResolveMorphAlias(std::string_view authorKey)
@@ -479,16 +434,6 @@ namespace
 				return c;
 			}
 
-			// Hide
-			if (auto h = TryParseHideToken(tokenView, strictIni)) {
-				FB::TimedCommand c{};
-				c.timeSeconds = t;
-				c.kind = FB::CommandKind::kHide;
-				c.target = dest;
-				c.hide = h->hide;
-				return c;
-			}
-
 			return std::nullopt;
 			};
 
@@ -631,12 +576,6 @@ namespace
 				}
 				else if (IEquals(key, "resetMorphsOnPairedStop")) {
 					newCfg.resetMorphsOnPairedStop = ParseBool(val, newCfg.resetMorphsOnPairedStop);
-				}
-				else if (IEquals(key, "resetScalesOnPairEnd")) {
-					newCfg.resetScalesOnPairEnd = ParseBool(val, newCfg.resetScalesOnPairEnd);
-				}
-				else if (IEquals(key, "resetScalesOnPairedStop")) {
-					newCfg.resetScalesOnPairedStop = ParseBool(val, newCfg.resetScalesOnPairedStop);
 				}
 				return;
 			}

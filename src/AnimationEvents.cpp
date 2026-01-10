@@ -1,17 +1,36 @@
 // AnimationEvents.cpp
 //
-// FullBodiedPlugin
+// FullBodiedPlugin - FB INI timeline parser (Scale system, expanding)
 //
-// Responsibilities (post-refactor):
-// - Receive BSAnimationGraphEvent tags on an actor
-// - Filter stop events (PairEnd / NPCPairedStop) and call CancelAndReset
-// - Filter FBEvent (and other start tags mapped in config), resolve a likely target,
-//   and start the timeline via ActorManager using commands parsed by FBConfig
+// INI file name: FullBodiedIni.ini
+// Preferred: Data\FullBodiedIni.ini
+// Fallback:  Data\SKSE\Plugins\FullBodiedIni.ini
 //
-// Parsing responsibilities live exclusively in FBConfig.
+// Event mapping:
+//   [EventToTimeline]   (also supports legacy [EventMap])
+//   <StartEventTag> = <TimelineName>
+//
+// Example:
+//   FBEvent = paired_huga.hkx
+//
+// Timeline sections (2-part):
+//   [FB:paired_huga.hkx|Caster]
+//   0.000000 FBScale_Head(1.0)
+//
+//   [FB:paired_huga.hkx|Target]
+//   0.000000 2_FBScale_Head(1.0)
+//
+// Token format (canonical):
+//   FBScale_<NodeKey>(<floatMultiplier>)
+//   2_FBScale_<NodeKey>(<floatMultiplier>)
+//
+// Future extension:
+//   FBVisible_<NodeKey>(true/false) etc (parser structured for this)
+//
+// Reset reinforcement:
+//   PairEnd and NPCPairedStop cancel pending tasks and reset caster + target (touched nodes only).
 
 #include "AnimationEvents.h"
-
 #include "ActorManager.h"
 #include "FBConfig.h"
 #include "FBScaler.h"
@@ -25,12 +44,19 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -40,15 +66,39 @@ namespace
 	static constexpr std::string_view kPairEndEvent = "PairEnd";
 	static constexpr std::string_view kPairedStopEvent = "NPCPairedStop";
 
-	// Target search radius (tune as needed; 200-300 tends to work for paired idles)
+	// Target search radius (tune as needed; 200–300 tends to work for paired idles)
 	static constexpr float kTargetSearchRadius = 250.0f;
 
 	// Debounce to avoid duplicate starts from duplicate sink registration / duplicate graphs
 	static constexpr float kStartDebounceSeconds = 0.20f;
 
+	// Target line prefix standard
+	static constexpr std::string_view kTargetPrefix = "2_";
+
 	// =========================
 	// Small string utils
 	// =========================
+	static inline void TrimInPlace(std::string& s)
+	{
+		auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+		s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+		s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+	}
+
+	static inline void StripInlineComment(std::string& s)
+	{
+		auto p1 = s.find(';');
+		auto p2 = s.find('#');
+		auto p = std::min(p1 == std::string::npos ? s.size() : p1,
+			p2 == std::string::npos ? s.size() : p2);
+		if (p != std::string::npos && p < s.size()) {
+			s.resize(p);
+		}
+	}
+
+	
+
+
 	static inline bool IEquals(const std::string& a, const char* b)
 	{
 		size_t i = 0;
@@ -62,13 +112,66 @@ namespace
 		return i == a.size() && b[i] == '\0';
 	}
 
+	static std::optional<float> ParseFloat(std::string s)
+	{
+		TrimInPlace(s);
+		if (s.empty()) {
+			return std::nullopt;
+		}
+		char* end = nullptr;
+		const float f = std::strtof(s.c_str(), &end);
+		if (!end || end == s.c_str()) {
+			return std::nullopt;
+		}
+		return f;
+	}
+
+	static bool ParseBool(const std::string& v, bool fallback)
+	{
+		std::string s = v;
+		TrimInPlace(s);
+		if (s.empty()) {
+			return fallback;
+		}
+		if (IEquals(s, "1") || IEquals(s, "true") || IEquals(s, "yes") || IEquals(s, "on")) {
+			return true;
+		}
+		if (IEquals(s, "0") || IEquals(s, "false") || IEquals(s, "no") || IEquals(s, "off")) {
+			return false;
+		}
+		return fallback;
+	}
+
+	static std::vector<std::string> Split(const std::string& s, char delim)
+	{
+		std::vector<std::string> out;
+		std::string cur;
+		for (char c : s) {
+			if (c == delim) {
+				out.push_back(cur);
+				cur.clear();
+			}
+			else {
+				cur.push_back(c);
+			}
+		}
+		out.push_back(cur);
+		return out;
+	}
+
+	// =========================
+	// Commands / Config model
+	// =========================
+	using FB::TargetKind;
+	using FB::TimedCommand;
+
 	// =========================
 	// Node mapping (stays here)
 	// =========================
 	static std::optional<std::string_view> ResolveNodeKey(std::string_view key)
 	{
 		// Author-facing NodeKey -> skeleton NiNode name mapping.
-		// Keep these keys stable; they are part of the INI "public API".
+		// Keep these keys stable; they are part of the INI “public API”.
 
 		// Head / Neck
 		if (key == "Head") return FB::Scaler::kNodeHead;
@@ -195,8 +298,8 @@ namespace
 	}
 
 	// =========================
-	// Timeline start + dispatch
-	// =========================
+// Timeline start + dispatch
+// =========================
 	static void StartTimelineForCaster(RE::Actor* caster, std::string_view startEventTag)
 	{
 		if (!caster) {
@@ -209,15 +312,15 @@ namespace
 			return;
 		}
 
-		// 1) Only proceed if this tag is mapped
+		// 1) FIRST: check whether this tag is mapped at all
 		auto itMap = cfg.eventToTimeline.find(std::string(startEventTag));
 		if (itMap == cfg.eventToTimeline.end()) {
-			return;
+			return;  // not a start tag we care about
 		}
 
 		const std::string_view timelineName{ itMap->second };
 
-		// 2) Debounce only real starts
+		// 2) THEN: debounce only real starts
 		const std::uint32_t casterFormID = caster->GetFormID();
 		if (ShouldDebounceStart(casterFormID)) {
 			if (cfg.dbg.logOps) {
@@ -227,7 +330,7 @@ namespace
 			return;
 		}
 
-		// 3) Retrieve timeline commands
+		// 3) Now find the timeline commands
 		auto itTL = cfg.timelines.find(std::string(timelineName));
 		if (itTL == cfg.timelines.end() || itTL->second.empty()) {
 			if (cfg.dbg.logOps) {
@@ -256,6 +359,8 @@ namespace
 			cfg.dbg.logOps);
 	}
 
+
+
 	static void CancelAndReset(RE::Actor* caster, std::string_view tag)
 	{
 		if (!caster) {
@@ -272,10 +377,6 @@ namespace
 			(isPairEnd && cfg.resetMorphsOnPairEnd) ||
 			(isPairedStop && cfg.resetMorphsOnPairedStop);
 
-		const bool doScaleReset =
-			(isPairEnd && cfg.resetScalesOnPairEnd) ||
-			(isPairedStop && cfg.resetScalesOnPairedStop);
-
 		FB::ActorManager::CancelAndReset(
 			caster->CreateRefHandle(),
 			casterFormID,
@@ -283,8 +384,8 @@ namespace
 			/*resetMorphsForCaster=*/doMorphReset,
 			/*resetMorphsForTarget=*/doMorphReset);
 
-
 	}
+
 
 	// =========================
 	// Event sink
@@ -309,7 +410,6 @@ namespace
 			const std::string_view tag{ a_event->tag.c_str(), a_event->tag.size() };
 			const auto& cfg = FB::Config::Get(&ResolveNodeKey);
 
-			// Stop events -> cancel + reset
 			if ((cfg.resetOnPairEnd && tag == kPairEndEvent) ||
 				(cfg.resetOnPairedStop && tag == kPairedStopEvent)) {
 
@@ -322,7 +422,8 @@ namespace
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
-			// Start events based on EventToTimeline mapping
+			// Start timelines based on EventToTimeline mapping
+			// Start timelines based on EventToTimeline mapping (quick prefilter)
 			if (cfg.eventToTimeline.contains(std::string(tag))) {
 				StartTimelineForCaster(caster, tag);
 			}
@@ -375,7 +476,6 @@ void HeadScale(RE::Actor* actor, float scale)
 	if (!actor) {
 		return;
 	}
-
 	const auto& cfg = FB::Config::Get(&ResolveNodeKey);
 	FB::Scaler::SetNodeScale(actor->CreateRefHandle(), FB::Scaler::kNodeHead, scale, cfg.dbg.logOps);
 }
