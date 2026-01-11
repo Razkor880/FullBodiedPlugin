@@ -20,6 +20,7 @@
 #include <charconv>
 #include <system_error>
 #include <cstdint>
+#include <charconv>
 
 namespace
 {
@@ -572,55 +573,134 @@ namespace
 		FB::TargetKind dest,
 		float timeSeconds,
 		bool strictIni,
-		bool logOps)
+		bool logIni)
 	{
-		// Must match exactly "FBHide("
+		// Forms:
+		//  - FBHide(true|false|1|0)                => full-body hide
+		//  - FBHide(<slot>, true|false)            => slot hide
+		//  - FBHide(slot=<slot>, true|false)       => slot hide
+
 		if (!token.starts_with("FBHide(")) {
 			return std::nullopt;
 		}
 
-		// Must end with ')', and must be long enough to contain something: "FBHide()"
-		if (token.size() < 8 || token.back() != ')') {  // 7 chars + ')' minimum
+		if (token.empty() || token.back() != ')') {
 			if (strictIni) {
 				spdlog::warn("[FB] INI: malformed FBHide token '{}'", token);
 			}
 			return std::nullopt;
 		}
 
-		// Extract contents inside parentheses
-		const auto innerView = token.substr(7, token.size() - 8); // len("FBHide(")=7
-		const std::string inner{ innerView };
+		const auto inner = token.substr(7, token.size() - 8);  // len("FBHide(")=7
 
-		bool hideValue = false;
+		auto trim_sv = [](std::string_view s) {
+			while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+			while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))  s.remove_suffix(1);
+			return s;
+			};
 
-		if (IEquals(inner, "true") || inner == "1") {
-			hideValue = true;
+		auto parse_bool = [&](std::string_view s) -> std::optional<bool> {
+			s = trim_sv(s);
+			const std::string ss{ s };
+			if (IEquals(ss, "true") || s == "1")  return true;
+			if (IEquals(ss, "false") || s == "0") return false;
+			return std::nullopt;
+			};
+
+		auto parse_u16 = [&](std::string_view s) -> std::optional<std::uint16_t> {
+			s = trim_sv(s);
+
+			// allow "slot=32"
+			if (s.starts_with("slot=")) {
+				s.remove_prefix(5);
+				s = trim_sv(s);
+			}
+
+			int base = 10;
+			if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+				base = 16;
+				s.remove_prefix(2);
+			}
+
+			unsigned int val = 0;
+			auto* b = s.data();
+			auto* e = s.data() + s.size();
+			auto res = std::from_chars(b, e, val, base);
+			if (res.ec != std::errc{} || res.ptr != e || val > 0xFFFFu) {
+				return std::nullopt;
+			}
+			return static_cast<std::uint16_t>(val);
+			};
+
+		// split on comma into max 2 parts
+		std::string_view a = inner;
+		std::string_view b{};
+		if (auto comma = inner.find(','); comma != std::string_view::npos) {
+			a = inner.substr(0, comma);
+			b = inner.substr(comma + 1);
 		}
-		else if (IEquals(inner, "false") || inner == "0") {
-			hideValue = false;
-		}
-		else {
+
+		a = trim_sv(a);
+		b = trim_sv(b);
+
+		FB::TimedCommand cmd{};
+		cmd.kind = FB::CommandKind::kHide;
+		cmd.target = dest;
+		cmd.timeSeconds = timeSeconds;
+
+		// Case 1: single argument => bool => full-body
+		if (b.empty()) {
+			if (auto bv = parse_bool(a)) {
+				cmd.hideMode = FB::HideMode::kAll;
+				cmd.hide = *bv;
+
+				if (logIni) {
+					spdlog::info(
+						"[FB] INI: hide parsed who={} mode=all hide={}",
+						(dest == FB::TargetKind::kCaster ? "Caster" : "Target"),
+						cmd.hide);
+				}
+				return cmd;
+			}
+
 			if (strictIni) {
-				spdlog::warn("[FB] INI: invalid FBHide value '{}'", innerView);
+				spdlog::warn("[FB] INI: invalid FBHide value '{}'", std::string(a));
 			}
 			return std::nullopt;
 		}
 
-		FB::TimedCommand cmd;
-		cmd.kind = FB::CommandKind::kHide;
-		cmd.target = dest;
-		cmd.timeSeconds = timeSeconds;
-		cmd.hide = hideValue;
+		// Case 2: two arguments => (slot, bool)
+		auto slotOpt = parse_u16(a);
+		auto boolOpt = parse_bool(b);
 
-		if (logOps) {
+		if (!slotOpt) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: invalid FBHide slot '{}'", std::string(a));
+			}
+			return std::nullopt;
+		}
+		if (!boolOpt) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: invalid FBHide value '{}'", std::string(b));
+			}
+			return std::nullopt;
+		}
+
+		cmd.hideMode = FB::HideMode::kSlot;
+		cmd.hideSlot = *slotOpt;
+		cmd.hide = *boolOpt;
+
+		if (logIni) {
 			spdlog::info(
-				"[FB] INI: hide parsed who={} hide={}",
+				"[FB] INI: hide parsed who={} mode=slot slot={} hide={}",
 				(dest == FB::TargetKind::kCaster ? "Caster" : "Target"),
-				hideValue);
+				cmd.hideSlot,
+				cmd.hide);
 		}
 
 		return cmd;
 	}
+
 
 
 
@@ -629,6 +709,7 @@ namespace
 		const std::string& cmdTok,
 		FB::TargetKind who,
 		bool strictIni,
+		bool logIni,
 		FB::Config::NodeKeyResolver resolver)
 	{
 		FB::TimedCommand out{};
@@ -671,16 +752,9 @@ namespace
 				return c;
 			}
 
-			// Hide (v1)
-			if (auto h = TryParseHideToken(tokenView, strictIni)) {
-				FB::TimedCommand c{};
-				c.timeSeconds = t;
-				c.kind = FB::CommandKind::kHide;
-				c.target = dest;
-				c.hideMode = FB::HideMode::kAll;
-				c.hideSlot = 0;
-				c.hide = h->hide;
-				return c;
+			// Hide (full-body or slot)
+			if (auto h = TryParseHideToken(tokenView, dest, t, strictIni, logIni)) {
+				return h;
 			}
 
 
@@ -920,7 +994,7 @@ namespace
 						continue;
 					}
 
-					if (auto cmd = ParseCommand(*t, cmdTok, activeFBSection->who, newCfg.dbg.strictIni, g_resolver)) {
+					if (auto cmd = ParseCommand(*t, cmdTok, activeFBSection->who, newCfg.dbg.strictIni, newCfg.dbg.logIni, g_resolver)) {
 						newCfg.timelines[activeFBSection->timeline].push_back(*cmd);
 
 						// TODO(TweenRefactor): Phase 3 Step 5 - log tween parsing with timeline context

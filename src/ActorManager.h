@@ -53,9 +53,9 @@ namespace FB
         TweenCurve tweenCurve{ TweenCurve::kLinear };
 
         // Hide payload (valid when kind==kHide)
-        bool hide{ false };
-        HideMode hideMode{ HideMode::kAll };
-        std::uint16_t hideSlot{ 0 };
+        HideMode      hideMode{ HideMode::kAll };
+        std::uint16_t hideSlot{ 0 };  // valid when hideMode==Slot
+        bool          hide{ false };
     };
 
 

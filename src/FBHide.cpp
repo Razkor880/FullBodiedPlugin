@@ -186,73 +186,14 @@ namespace FB::Hide
         }
     }
 
-    void ApplyHideSlot(RE::ActorHandle a_actor, std::uint16_t a_slotNumber, bool a_hide, bool logOps)
+    void ApplyHideSlot(RE::ActorHandle a_actor, std::uint16_t slotNumber, bool hide, bool logOps)
     {
-        const auto actorID = GetActorID(a_actor);
-        if (actorID == 0) {
-            return;
-        }
-
-        auto* root = GetRoot3D(a_actor);
-        if (!root) {
-            return;
-        }
-
-        std::vector<RE::BSGeometry*> geoms;
-        geoms.reserve(256);
-        TraverseGeometry(root, geoms);
-
-        bool anyDismember = false;
-
-        {
-            std::scoped_lock lk(g_mutex);
-            auto& state = g_stateByActorID[actorID];
-
-            for (auto* geo : geoms) {
-                if (!geo) {
-                    continue;
-                }
-
-                // CommonLib: skinInstance is in GEOMETRY_RUNTIME_DATA
-                auto* skin = geo->GetGeometryRuntimeData().skinInstance.get();
-                if (!skin) {
-                    continue;
-                }
-
-                auto* dismember = netimmerse_cast<RE::BSDismemberSkinInstance*>(skin);
-                if (!dismember) {
-                    continue;
-                }
-
-                anyDismember = true;
-
-                const bool enable = !a_hide;
-
-                // NOTE: Your header exposes UpdateDismemberPartion (typo in name); use that exact symbol.
-                dismember->UpdateDismemberPartion(a_slotNumber, enable);
-
-                state.touchedSlots.insert(a_slotNumber);
-            }
-        }
-
-        if (!anyDismember) {
-            if (logOps) {
-                std::scoped_lock lk(g_mutex);
-                auto& state = g_stateByActorID[actorID];
-                if (state.loggedNoDismemberSlots.insert(a_slotNumber).second) {
-                    spdlog::info(
-                        "[FBHide] ApplyHideSlot: actor {:08X} slot={} no eligible BSDismember partitions (no-op)",
-                        actorID, a_slotNumber);
-                }
-            }
-            return;
-        }
-
         if (logOps) {
-            spdlog::info("[FBHide] ApplyHideSlot: actor {:08X} slot={} hide={} geoms={}",
-                actorID, a_slotNumber, a_hide, geoms.size());
+            const auto actorID = GetActorID(a_actor);
+            spdlog::info("[FBHide] ApplyHideSlot: actor {:08X} slot={} hide={} (stub/no-op)", actorID, slotNumber, hide);
         }
     }
+
 
     void ResetActor(RE::ActorHandle a_actor, bool logOps)
     {

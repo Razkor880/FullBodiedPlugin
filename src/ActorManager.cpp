@@ -242,36 +242,20 @@ namespace
         g_activeTweens[key] = std::move(tw);
     }
 
-    static void ExecuteHide(std::uint32_t casterFormID,
-        const RE::ActorHandle& actorHandle,
-        const FB::TimedCommand& cmd,
-        bool logOps)
+    static void ExecuteHide(std::uint32_t /*casterFormID*/, RE::ActorHandle actor, const FB::TimedCommand& cmd, bool logOps)
     {
-        if (!actorHandle) {
+        if (!actor) {
             return;
         }
 
-        auto actorRef = actorHandle.get();
-        if (!actorRef) {
-            return;
-        }
-
-        const auto mode = cmd.hideMode;
         if (cmd.hideMode == FB::HideMode::kAll) {
-            FB::Hide::ApplyHide(actorHandle, cmd.hide, logOps);
+            FB::Hide::ApplyHide(actor, cmd.hide, logOps);
         }
         else {
-            FB::Hide::ApplyHideSlot(actorHandle, cmd.hideSlot, cmd.hide, logOps);
+            FB::Hide::ApplyHideSlot(actor, cmd.hideSlot, cmd.hide, logOps);
         }
-
-
-
-
-
-
-
-        //MarkTouchedHide(casterFormID, cmd.target); // if you implement touched hide
     }
+
 
     static void ClearTweensForCaster(std::uint32_t casterFormID)
     {
