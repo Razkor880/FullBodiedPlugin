@@ -75,7 +75,7 @@ Internal parsing may evolve, but **the external INI grammar must remain stable o
 - Does **not** parse parameters
 - Does **not** apply effects
 
-### PlayerUpdateHook
+### FBUpdatePump
 - Deterministic per-frame vfunc hook
 - Multiple commands can fire per frame, order preserved
 - Cancellation mid-timeline is safe and immediate
