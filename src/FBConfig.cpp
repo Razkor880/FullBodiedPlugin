@@ -17,6 +17,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <charconv>
+#include <system_error>
+#include <cstdint>
 
 namespace
 {
@@ -199,6 +202,13 @@ namespace
 		bool hide{ false };
 	};
 
+	struct ParsedHideSlot
+	{
+		std::uint16_t slot{ 0 };
+		bool hide{ false };
+	};
+
+
 	static std::optional<ParsedHide> TryParseHideToken(std::string_view token, bool strictIni)
 	{
 		// Must match exactly "FBHide("
@@ -237,6 +247,114 @@ namespace
 		return std::nullopt;
 	}
 
+	static std::optional<ParsedHideSlot> TryParseHideSlotToken(std::string_view token, bool strictIni)
+	{
+		// Must match exactly "FBHideSlot("
+		if (!token.starts_with("FBHideSlot(")) {
+			return std::nullopt;
+		}
+
+		// Must end with ')'
+		if (token.empty() || token.back() != ')') {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: malformed FBHideSlot token '{}'", token);
+			}
+			return std::nullopt;
+		}
+
+		// Extract contents inside parentheses: FBHideSlot( ... )
+		// len("FBHideSlot(")=11
+		const auto innerView = token.substr(11, token.size() - 12);
+
+		// Expect two args: <slot>, <bool>
+		// Find comma
+		const auto commaPos = innerView.find(',');
+		if (commaPos == std::string_view::npos) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: FBHideSlot requires 2 args (slot,bool), got '{}'", std::string(innerView));
+			}
+			return std::nullopt;
+		}
+
+		auto left = innerView.substr(0, commaPos);
+		auto right = innerView.substr(commaPos + 1);
+
+		// Trim helper (local lambda)
+		auto trim = [](std::string_view sv) -> std::string_view {
+			const auto is_ws = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+			while (!sv.empty() && is_ws(static_cast<unsigned char>(sv.front()))) {
+				sv.remove_prefix(1);
+			}
+			while (!sv.empty() && is_ws(static_cast<unsigned char>(sv.back()))) {
+				sv.remove_suffix(1);
+			}
+			return sv;
+			};
+
+		left = trim(left);
+		right = trim(right);
+
+		if (left.empty() || right.empty()) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: FBHideSlot requires 2 non-empty args (slot,bool), got '{}'", std::string(innerView));
+			}
+			return std::nullopt;
+		}
+
+		// Parse slot (reject negatives; StrictIni bounds 0..255)
+		// We'll parse into int first to detect negative.
+		int slotInt = 0;
+		{
+			// std::from_chars requires contiguous chars; string_view ok.
+			const char* begin = left.data();
+			const char* end = left.data() + left.size();
+
+			// Allow optional leading +/-, but reject negative later.
+			auto [ptr, ec] = std::from_chars(begin, end, slotInt);
+			if (ec != std::errc() || ptr != end) {
+				if (strictIni) {
+					spdlog::warn("[FB] INI: invalid FBHideSlot slot '{}'", std::string(left));
+				}
+				return std::nullopt;
+			}
+		}
+
+		if (slotInt < 0) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: FBHideSlot slot must be >= 0, got {}", slotInt);
+			}
+			return std::nullopt;
+		}
+
+		if (slotInt > 255) {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: FBHideSlot slot out of range (0..255), got {}", slotInt);
+			}
+			return std::nullopt;
+		}
+
+		// Parse bool (same rules as v1)
+		const std::string rightStr{ right };  // IEquals takes std::string
+		bool hideValue = false;
+
+		if (IEquals(rightStr, "true") || rightStr == "1") {
+			hideValue = true;
+		}
+		else if (IEquals(rightStr, "false") || rightStr == "0") {
+			hideValue = false;
+		}
+		else {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: invalid FBHideSlot bool '{}'", rightStr);
+			}
+			return std::nullopt;
+		}
+
+		ParsedHideSlot out{};
+		out.slot = static_cast<std::uint16_t>(slotInt);
+		out.hide = hideValue;
+		return out;
+	}
 
 
 	static std::optional<ParsedScale> TryParseScaleToken(
@@ -461,32 +579,29 @@ namespace
 			return std::nullopt;
 		}
 
-		// Expect trailing ')'
-		if (token.back() != ')') {
+		// Must end with ')', and must be long enough to contain something: "FBHide()"
+		if (token.size() < 8 || token.back() != ')') {  // 7 chars + ')' minimum
 			if (strictIni) {
 				spdlog::warn("[FB] INI: malformed FBHide token '{}'", token);
-				return std::nullopt;
 			}
 			return std::nullopt;
 		}
 
 		// Extract contents inside parentheses
-		const auto inner = token.substr(7, token.size() - 8); // len("FBHide(")=7
-
-		const std::string innerStr{ inner };
+		const auto innerView = token.substr(7, token.size() - 8); // len("FBHide(")=7
+		const std::string inner{ innerView };
 
 		bool hideValue = false;
 
-		if (IEquals(innerStr, "true") || inner == "1") {
+		if (IEquals(inner, "true") || inner == "1") {
 			hideValue = true;
 		}
-		else if (IEquals(innerStr, "false") || inner == "0") {
+		else if (IEquals(inner, "false") || inner == "0") {
 			hideValue = false;
 		}
 		else {
 			if (strictIni) {
-				spdlog::warn("[FB] INI: invalid FBHide value '{}'", inner);
-				return std::nullopt;
+				spdlog::warn("[FB] INI: invalid FBHide value '{}'", innerView);
 			}
 			return std::nullopt;
 		}
@@ -506,6 +621,7 @@ namespace
 
 		return cmd;
 	}
+
 
 
 	static std::optional<FB::TimedCommand> ParseCommand(
@@ -543,15 +659,30 @@ namespace
 				return c;
 			}
 
-			// Hide
+			// HideSlot
+			if (auto hs = TryParseHideSlotToken(tokenView, strictIni)) {
+				FB::TimedCommand c{};
+				c.timeSeconds = t;
+				c.kind = FB::CommandKind::kHide;
+				c.target = dest;
+				c.hideMode = FB::HideMode::kSlot;
+				c.hideSlot = hs->slot;
+				c.hide = hs->hide;
+				return c;
+			}
+
+			// Hide (v1)
 			if (auto h = TryParseHideToken(tokenView, strictIni)) {
 				FB::TimedCommand c{};
 				c.timeSeconds = t;
 				c.kind = FB::CommandKind::kHide;
 				c.target = dest;
+				c.hideMode = FB::HideMode::kAll;
+				c.hideSlot = 0;
 				c.hide = h->hide;
 				return c;
 			}
+
 
 
 			return std::nullopt;

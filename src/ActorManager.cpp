@@ -256,7 +256,19 @@ namespace
             return;
         }
 
-        FB::Hide::ApplyHide(actorHandle, cmd.hide, logOps);
+        const auto mode = cmd.hideMode;
+        if (cmd.hideMode == FB::HideMode::kAll) {
+            FB::Hide::ApplyHide(actorHandle, cmd.hide, logOps);
+        }
+        else {
+            FB::Hide::ApplyHideSlot(actorHandle, cmd.hideSlot, cmd.hide, logOps);
+        }
+
+
+
+
+
+
 
         //MarkTouchedHide(casterFormID, cmd.target); // if you implement touched hide
     }
@@ -342,6 +354,9 @@ namespace FB::ActorManager
                 const auto actorHandle = ResolveActor(tl, cmd.target);
                 if (cmd.kind == FB::CommandKind::kScale) {
                     ExecuteScale(tl.casterFormID, actorHandle, cmd, tl.logOps);
+                }
+                else if (cmd.kind == FB::CommandKind::kHide) {
+                    ExecuteHide(tl.casterFormID, actorHandle, cmd, tl.logOps);
                 }
 
                 if (cmd.kind == FB::CommandKind::kScale) {

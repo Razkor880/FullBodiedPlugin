@@ -1,20 +1,22 @@
 #pragma once
 
-//#include "RE/Skyrim.h"
+#include "RE/Skyrim.h"
 
 namespace FB::Hide
 {
-	// Broad hide/unhide for all render geometry on an actor.
-	// - hide=true: capture baseline on first touch, then hide all shapes
-	// - hide=false: best-effort restore baseline (does NOT clear state)
-	void ApplyHide(RE::ActorHandle actor, bool hide, bool logOps);
+	// Hide/unhide every renderable geometry under the actor's 3D root.
+	// On first touch per-actor, we cache the baseline hidden flag and restore it when un-hiding.
+	void ApplyHide(RE::ActorHandle a_actor, bool a_hide, bool logOps);
 
-	// Best-effort restore baseline (if 3D present), then clear all stored state for this actor.
-	// If 3D missing, safely clears state and optionally logs that restore was skipped.
-	void ResetActor(RE::ActorHandle actor, bool logOps);
+	// Best-effort slot-based hide using BSDismember partitions.
+	// If no eligible dismember skin instances are found, this is a no-op (and can log once per slot).
+	void ApplyHideSlot(RE::ActorHandle a_actor, std::uint16_t a_slotNumber, bool a_hide, bool logOps);
+
+	// Clears cached baseline/touched state for this actor; attempts to restore baseline if 3D is present.
+	void ResetActor(RE::ActorHandle a_actor, bool logOps);
 
 #ifndef NDEBUG
-	// Debug-only escape hatch: clears all stored state (does not attempt restore).
+	// Debug only: clears all cached state.
 	void ResetAll(bool logOps);
 #endif
 }

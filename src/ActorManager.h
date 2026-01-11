@@ -22,12 +22,18 @@ namespace FB
         kHide
     };
 
-    // TODO(TweenRefactor): Phase 2 - data model fields are added but not used yet.
     enum class TweenCurve
     {
         kLinear
     };
- 
+
+    // Hide mode is separated (not nested) so callsites can use FB::HideMode::kAll / kSlot cleanly.
+    enum class HideMode
+    {
+        kAll,
+        kSlot
+    };
+
     struct TimedCommand
     {
         CommandKind kind{ CommandKind::kScale };
@@ -39,40 +45,41 @@ namespace FB
         float            scale{ 1.0f };
 
         // Morph payload (valid when kind==kMorph)
-        std::string morphName{};   // IMPORTANT: own the string (no dangling string_view)
-        float       delta{ 0.0f }; // delta-only (add/subtract)
+        std::string morphName{};
+        float       delta{ 0.0f };
 
         // Tween payload (optional; used only when kind==kMorph)
-// tweenSeconds = total duration over which 'delta' is applied (delta is distributed over time).
         float tweenSeconds{ 0.0f };
         TweenCurve tweenCurve{ TweenCurve::kLinear };
 
         // Hide payload (valid when kind==kHide)
         bool hide{ false };
-
+        HideMode hideMode{ HideMode::kAll };
+        std::uint16_t hideSlot{ 0 };
     };
-}
-
-namespace FB::ActorManager
-{
-    void StartTimeline(
-        RE::ActorHandle caster,
-        RE::ActorHandle target,
-        std::uint32_t casterFormID,
-        std::vector<FB::TimedCommand> commands,
-        bool logOps);
-
-    // TODO(TweenRefactor): Phase 4/5 - deterministic tick entry point (game-thread pump calls this)
-    void Update(float dtSeconds);
 
 
 
-    // Cancel pending work, reset touched scales, and optionally clear morph keys.
-    void CancelAndReset(
-        RE::ActorHandle caster,
-        std::uint32_t casterFormID,
-        bool logOps,
-        bool resetMorphCaster,
-        bool resetMorphTarget);
+    namespace ActorManager
+    {
+        // Start a deterministic timeline for a caster/target pair.
+        // Commands include their own TargetKind (caster/target) and timeSeconds.
+        void StartTimeline(
+            RE::ActorHandle caster,
+            RE::ActorHandle target,
+            std::uint32_t casterFormID,
+            std::vector<FB::TimedCommand> commands,
+            bool logOps);
 
+        // Cancel current work for casterFormID/token lineage and optionally reset morphs.
+        void CancelAndReset(
+            RE::ActorHandle caster,
+            std::uint32_t casterFormID,
+            bool logOps,
+            bool resetMorphCaster,
+            bool resetMorphTarget);
+
+        // Deterministic tick entry point. Called by your PlayerCharacter::Update hook/pump.
+        void Update(float dtSeconds);
+    }
 }
