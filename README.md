@@ -39,13 +39,13 @@ The core goal is to allow animation context (paired or unpaired) to drive precis
 
 ### C++ (SKSE / CommonLibSSE-NG)
 - `src/FullBodiedPlugin.cpp`
-- `src/AnimEventListener.h / .cpp`
 - `src/AnimationEvents.h / .cpp`
 - `src/ActorManager.h / .cpp`
 - `src/FBScaler.h / .cpp`
 - `src/FBMorph.h / .cpp`
+- `src/FBHide.h / .cpp`
 - `src/FBConfig.h / .cpp`
-- `src/PlayerUpdateHook.h / .cpp`
+- `src/FBUpdatePump.h / .cpp`
 
 ### Papyrus
 - `FBMorphBridge.psc`
