@@ -18,7 +18,8 @@ namespace FB
     enum class CommandKind
     {
         kScale,
-        kMorph
+        kMorph,
+        kHide
     };
 
     // TODO(TweenRefactor): Phase 2 - data model fields are added but not used yet.
@@ -45,6 +46,9 @@ namespace FB
 // tweenSeconds = total duration over which 'delta' is applied (delta is distributed over time).
         float tweenSeconds{ 0.0f };
         TweenCurve tweenCurve{ TweenCurve::kLinear };
+
+        // Hide payload (valid when kind==kHide)
+        bool hide{ false };
 
     };
 }

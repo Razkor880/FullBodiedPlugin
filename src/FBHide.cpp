@@ -1,4 +1,4 @@
-//#include "FBHide.h"
+#include "FBHide.h"
 
 #include <RE/N/NiNode.h>
 #include <RE/N/NiRTTI.h>

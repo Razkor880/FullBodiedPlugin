@@ -44,6 +44,10 @@ namespace
 		}
 	}
 
+	static bool IEquals(std::string_view a, const char* b)
+	{
+		return IEquals(std::string(a), b);
+	}
 	static inline bool IEquals(const std::string& a, const char* b)
 	{
 		size_t i = 0;
@@ -190,6 +194,51 @@ namespace
 		float scale{ 1.0f };
 	};
 
+	struct ParsedHide
+	{
+		bool hide{ false };
+	};
+
+	static std::optional<ParsedHide> TryParseHideToken(std::string_view token, bool strictIni)
+	{
+		// Must match exactly "FBHide("
+		if (!token.starts_with("FBHide(")) {
+			return std::nullopt;
+		}
+
+		// Must end with ')'
+		if (token.empty() || token.back() != ')') {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: malformed FBHide token '{}'", token);
+			}
+			return std::nullopt;
+		}
+
+		// Extract contents inside parentheses: FBHide( ... )
+		const auto innerView = token.substr(7, token.size() - 8);  // len("FBHide(")=7
+
+		// IEquals takes std::string, so convert once
+		const std::string inner{ innerView };
+
+		ParsedHide out{};
+
+		if (IEquals(inner, "true") || inner == "1") {
+			out.hide = true;
+			return out;
+		}
+		if (IEquals(inner, "false") || inner == "0") {
+			out.hide = false;
+			return out;
+		}
+
+		if (strictIni) {
+			spdlog::warn("[FB] INI: invalid FBHide value '{}'", inner);
+		}
+		return std::nullopt;
+	}
+
+
+
 	static std::optional<ParsedScale> TryParseScaleToken(
 		std::string_view tok,
 		bool strictIni,
@@ -275,6 +324,8 @@ namespace
 		// Default: use token as-is
 		return std::string(authorKey);
 	}
+
+
 
 	static std::optional<ParsedMorph> TryParseMorphToken(std::string_view tok, bool strictIni)
 	{
@@ -398,6 +449,64 @@ namespace
 		return out;
 	}
 
+	static std::optional<FB::TimedCommand> TryParseHideToken(
+		std::string_view token,
+		FB::TargetKind dest,
+		float timeSeconds,
+		bool strictIni,
+		bool logOps)
+	{
+		// Must match exactly "FBHide("
+		if (!token.starts_with("FBHide(")) {
+			return std::nullopt;
+		}
+
+		// Expect trailing ')'
+		if (token.back() != ')') {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: malformed FBHide token '{}'", token);
+				return std::nullopt;
+			}
+			return std::nullopt;
+		}
+
+		// Extract contents inside parentheses
+		const auto inner = token.substr(7, token.size() - 8); // len("FBHide(")=7
+
+		const std::string innerStr{ inner };
+
+		bool hideValue = false;
+
+		if (IEquals(innerStr, "true") || inner == "1") {
+			hideValue = true;
+		}
+		else if (IEquals(innerStr, "false") || inner == "0") {
+			hideValue = false;
+		}
+		else {
+			if (strictIni) {
+				spdlog::warn("[FB] INI: invalid FBHide value '{}'", inner);
+				return std::nullopt;
+			}
+			return std::nullopt;
+		}
+
+		FB::TimedCommand cmd;
+		cmd.kind = FB::CommandKind::kHide;
+		cmd.target = dest;
+		cmd.timeSeconds = timeSeconds;
+		cmd.hide = hideValue;
+
+		if (logOps) {
+			spdlog::info(
+				"[FB] INI: hide parsed who={} hide={}",
+				(dest == FB::TargetKind::kCaster ? "Caster" : "Target"),
+				hideValue);
+		}
+
+		return cmd;
+	}
+
 
 	static std::optional<FB::TimedCommand> ParseCommand(
 		float t,
@@ -433,6 +542,17 @@ namespace
 				c.tweenCurve = m->tweenCurve;
 				return c;
 			}
+
+			// Hide
+			if (auto h = TryParseHideToken(tokenView, strictIni)) {
+				FB::TimedCommand c{};
+				c.timeSeconds = t;
+				c.kind = FB::CommandKind::kHide;
+				c.target = dest;
+				c.hide = h->hide;
+				return c;
+			}
+
 
 			return std::nullopt;
 			};

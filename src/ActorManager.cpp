@@ -2,6 +2,7 @@
 
 #include "FBScaler.h"
 #include "FBMorph.h"
+#include "FBHide.h"
 
 #include <spdlog/spdlog.h>
 
@@ -241,6 +242,25 @@ namespace
         g_activeTweens[key] = std::move(tw);
     }
 
+    static void ExecuteHide(std::uint32_t casterFormID,
+        const RE::ActorHandle& actorHandle,
+        const FB::TimedCommand& cmd,
+        bool logOps)
+    {
+        if (!actorHandle) {
+            return;
+        }
+
+        auto actorRef = actorHandle.get();
+        if (!actorRef) {
+            return;
+        }
+
+        FB::Hide::ApplyHide(actorHandle, cmd.hide, logOps);
+
+        //MarkTouchedHide(casterFormID, cmd.target); // if you implement touched hide
+    }
+
     static void ClearTweensForCaster(std::uint32_t casterFormID)
     {
         for (auto it = g_activeTweens.begin(); it != g_activeTweens.end(); ) {
@@ -323,6 +343,14 @@ namespace FB::ActorManager
                 if (cmd.kind == FB::CommandKind::kScale) {
                     ExecuteScale(tl.casterFormID, actorHandle, cmd, tl.logOps);
                 }
+
+                if (cmd.kind == FB::CommandKind::kScale) {
+                    ExecuteScale(tl.casterFormID, actorHandle, cmd, tl.logOps);
+                }
+                else if (cmd.kind == FB::CommandKind::kHide) {
+                    ExecuteHide(tl.casterFormID, actorHandle, cmd, tl.logOps);
+                }
+
                 else if (cmd.kind == FB::CommandKind::kMorph) {
 
                     // TODO(TweenRefactor Phase 9): runtime currently supports LINEAR tween curves only.
