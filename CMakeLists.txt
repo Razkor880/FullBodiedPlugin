@@ -8,7 +8,12 @@ cmake_minimum_required(VERSION 3.21)
 
 # [BEGIN set_project_name]
 # Set your project name. This will be the name of your SKSE .dll file.
+cmake_minimum_required(VERSION 3.21)
+
+# [BEGIN set_project_name]
+# Set your project name. This will be the name of your SKSE .dll file.
 project(FullBodiedPlugin VERSION 0.0.1 LANGUAGES CXX)
+
 
 # [END set_project_name]
 
@@ -36,17 +41,28 @@ endif()
 
 # Otherwise, you can set OUTPUT_FOLDER to any place you'd like :)
 # set(OUTPUT_FOLDER "C:/path/to/any/folder")
-set(OUTPUT_FOLDER "C:/Wabbajack Lists/SME2/mods/Full Bodied Animations")
+set(OUTPUT_FOLDER "C:/Wabbajack Lists/SME/mods/Full Bodied Animations/")
 # Setup your SKSE plugin as an SKSE plugin!
 find_package(CommonLibSSE CONFIG REQUIRED)
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
+
     src/FullBodiedPlugin.cpp
-    src/AnimEventListener.cpp
-    src/AnimEventListener.h
     src/AnimationEvents.cpp
     src/AnimationEvents.h
+    src/ActorManager.cpp
+    src/ActorManager.h
+    src/FBUpdatePump.cpp
+    src/FBUpdatePump.h
     src/FBScaler.cpp
     src/FBScaler.h
+    src/FBConfig.cpp
+    src/FBConfig.h
+    src/FBMorph.cpp
+    src/FBMorph.h
+    src/FBHide.cpp
+    src/FBHide.h
+    src/SimpleIni.h
+
 )
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23) # <--- use C++23 standard
 target_precompile_headers(${PROJECT_NAME} PRIVATE PCH.h) # <--- PCH.h is required!
