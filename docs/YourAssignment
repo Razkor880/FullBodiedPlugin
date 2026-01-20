@@ -1,1 +1,1 @@
-Your assignment is to implement a tweening feature for FBScale that matches how this is already achieved with FBMorph. Edits should be as minimal as possible and shall not introduce a new timing feature. 
+Your assignment is to implement facial expression morphs, as an expansion of FBMorph.cpp and .h
