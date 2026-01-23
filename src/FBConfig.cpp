@@ -435,14 +435,51 @@ namespace
 	{
 		// INI tokens must not contain spaces (parser uses >>), but RaceMenu morph names often do.
 		// Add aliases here when you want author-friendly tokens.
+		//
+		// Naming policy:
+		// - Default: token is treated as the exact RaceMenu morph name (case-sensitive).
+		// - Optional: map author-friendly tokens to exact morph names (including spaces).
+		//
+		// This works for:
+		// - Body morph sliders
+		// - Facial expression sliders
+		// - Phoneme sliders (Aah/Oh/FV/BMP/etc)
+		//
+		// Keep this table small and intentional.
 
+		// ---- Existing example (spaces) ----
 		if (authorKey == "VorePreyBelly" || authorKey == "Vore_Prey_Belly") {
 			return "Vore Prey Belly";
 		}
+		if (authorKey == "VorePreyBelly2" || authorKey == "Vore_Prey_Belly_2") {
+			return "Vore Prey Belly 2";
+		}
+		if (authorKey == "VorePreyBelly3" || authorKey == "Vore_Prey_Belly_3") {
+			return "Vore Prey Belly 3";
+		}
+		if (authorKey == "StruggleBumps1" || authorKey == "Struggle_Bumps_1") {
+			return "Struggle Bumps 1";
+		}
+		if (authorKey == "StruggleBumps2" || authorKey == "Struggle_Bumps_2") {
+			return "Struggle Bumps 2";
+		}
+		if (authorKey == "StruggleBumps3" || authorKey == "Struggle_Bumps_3") {
+			return "Struggle Bumps 3";
+		}
+		if (authorKey == "FBSwallow1" || authorKey == "FB_Swallow_1") {
+			return "FB Swallow 1";
+		}
 
-		// Default: use token as-is
+		// ---- Optional conveniences (examples only; uncomment if YOUR sliders differ) ----
+		// if (authorKey == "Eyes_Closed") return "Eyes Closed";
+		// if (authorKey == "Brow_Up")     return "Brow Up";
+
+		// Phonemes are usually already space-free and can be passed through:
+		// "Aah", "Oh", "FV", "BMP", etc.
+
 		return std::string(authorKey);
 	}
+
 
 
 
@@ -979,12 +1016,21 @@ namespace
 				if (activeFBSection && activeFBSection->supported && !activeFBSection->timeline.empty()) {
 					std::istringstream iss(line);
 					std::string timeTok;
-					std::string cmdTok;
 
-					// IMPORTANT: command token must not contain spaces (e.g. "FBMorph_X(10)" is OK)
-					if (!(iss >> timeTok >> cmdTok)) {
+					// Read time token
+					if (!(iss >> timeTok)) {
 						continue;
 					}
+
+					// Read the rest of the line as the command (can contain spaces)
+					std::string cmdTok;
+					std::getline(iss, cmdTok);
+					TrimInPlace(cmdTok);
+
+					if (cmdTok.empty()) {
+						continue;
+					}
+
 
 					auto t = ParseFloat(timeTok);
 					if (!t) {

@@ -10,9 +10,19 @@ namespace FB::Morph
 	// Key used for all NiOverride operations from this plugin
 	inline constexpr std::string_view kMorphKey = "FullBodiedPlugin";
 
-	// Logical morph keys supported by FBConfig
-	// FBConfig validates these; FBMorph maps them to real RaceMenu morph names.
+	// NOTE:
+	// FBConfig does NOT enforce a fixed list of morph keys.
+	// The INI token suffix after "FBMorph_" is treated as the RaceMenu morph name,
+	// optionally run through FBConfig's alias resolver for author-friendly naming.
+
+	// (Optional legacy alias constant; safe to keep if you like it for documentation)
 	inline constexpr std::string_view kMorph_VorePreyBelly = "Vore Prey Belly";
+	inline constexpr std::string_view kMorph_VorePreyBelly2 = "Vore Prey Belly 2";
+	inline constexpr std::string_view kMorph_VorePreyBelly3 = "Vore Prey Belly 3";
+	inline constexpr std::string_view kMorph_StruggleBumps1 = "Struggle Bumps 1";
+	inline constexpr std::string_view kMorph_StruggleBumps2 = "Struggle Bumps 2";
+	inline constexpr std::string_view kMorph_StruggleBumps3 = "Struggle Bumps 3";
+	inline constexpr std::string_view kMorph_FBSwallow1 = "FB Swallow 1";
 
 	// Clamp range for final slider values
 	inline constexpr float kMinValue = 0.0f;

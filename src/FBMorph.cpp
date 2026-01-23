@@ -1,6 +1,7 @@
 #include "FBMorph.h"
 
 #include "RE/F/FunctionArguments.h"
+#include "RE/I/IObjectHandlePolicy.h"
 #include "RE/S/SkyrimVM.h"
 #include "SKSE/SKSE.h"
 
@@ -64,17 +65,13 @@ namespace
     //   FBMorph_BreastsNewSH(...)   -> "BreastsNewSH"
     //
     // If you ever want aliases or nicer INI names, this is the place to map them.
-    static const char* ResolveRaceMenuMorphName(std::string_view key)
+    static std::string ResolveRaceMenuMorphName(std::string_view key)
     {
-        // Example of explicit alias, if desired:
-        // if (key == FB::Morph::kMorph_VorePreyBelly) {
-        //     return "Vore Prey Belly";
-        // }
-
-        // Default: treat INI key as the actual morph name
-        // (must match RaceMenu slider name exactly)
-        return key.data();
+        // Default: the key is already the intended RaceMenu morph name.
+        // Alias mapping belongs in FBConfig.cpp (ResolveMorphAlias).
+        return std::string(key);
     }
+
 
     static RE::BSScript::IVirtualMachine* GetVM()
     {
@@ -123,6 +120,124 @@ namespace
         }
     }
 
+    static void Papyrus_ActorSetExpressionPhoneme(RE::Actor* actor, int phonemeIndex, float value01, bool logOps)
+    {
+        if (!actor) {
+            return;
+        }
+
+        auto* vm = GetVM();
+        if (!vm) {
+            if (logOps) {
+                spdlog::warn("[FB] Morph: SkyrimVM/IVirtualMachine not available (phoneme)");
+            }
+            return;
+        }
+
+        auto* policy = vm->GetObjectHandlePolicy();
+        if (!policy) {
+            if (logOps) {
+                spdlog::warn("[FB] Morph: ObjectHandlePolicy not available (phoneme)");
+            }
+            return;
+        }
+
+        const auto handle = policy->GetHandleForObject(actor->GetFormType(), actor);
+        if (!handle || handle == policy->EmptyHandle()) {
+            if (logOps) {
+                spdlog::warn("[FB] Morph: invalid VM handle for actor (phoneme)");
+            }
+            return;
+        }
+
+        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result{};
+
+        // Actor.SetExpressionPhoneme(int index, float value)
+        auto* args = RE::MakeFunctionArguments(
+            static_cast<std::int32_t>(phonemeIndex),
+            static_cast<float>(value01));
+
+        const bool ok = vm->DispatchMethodCall(
+            handle,
+            RE::BSFixedString("Actor"),
+            RE::BSFixedString("SetExpressionPhoneme"),
+            args,
+            result);
+
+        if (logOps) {
+            spdlog::info("[FB] ActorCall: SetExpressionPhoneme={} idx={} value={}", ok, phonemeIndex, value01);
+        }
+    }
+
+    static void Papyrus_ActorSetExpressionOverride(RE::Actor* actor, int moodId, int strength, bool logOps)
+    {
+        if (!actor) {
+            return;
+        }
+
+        auto* vm = GetVM();
+        if (!vm) {
+            if (logOps) spdlog::warn("[FB] Morph: SkyrimVM not available (expression)");
+            return;
+        }
+
+        auto* policy = vm->GetObjectHandlePolicy();
+        if (!policy) {
+            if (logOps) spdlog::warn("[FB] Morph: ObjectHandlePolicy not available (expression)");
+            return;
+        }
+
+        const auto handle = policy->GetHandleForObject(actor->GetFormType(), actor);
+        if (!handle || handle == policy->EmptyHandle()) {
+            if (logOps) spdlog::warn("[FB] Morph: invalid VM handle for actor (expression)");
+            return;
+        }
+
+        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result{};
+        auto* args = RE::MakeFunctionArguments(
+            static_cast<std::int32_t>(moodId),
+            static_cast<std::int32_t>(strength));
+
+        const bool ok = vm->DispatchMethodCall(
+            handle,
+            RE::BSFixedString("Actor"),
+            RE::BSFixedString("SetExpressionOverride"),
+            args,
+            result);
+
+        if (logOps) {
+            spdlog::info("[FB] ActorCall: SetExpressionOverride={} mood={} strength={}", ok, moodId, strength);
+        }
+    }
+
+    static void Papyrus_ActorSetExpressionModifier(RE::Actor* actor, int modifierIndex, float value, bool logOps)
+    {
+        if (!actor) return;
+
+        auto* vm = GetVM();
+        if (!vm) return;
+
+        auto* policy = vm->GetObjectHandlePolicy();
+        if (!policy) return;
+
+        const auto handle = policy->GetHandleForObject(actor->GetFormType(), actor);
+        if (!handle || handle == policy->EmptyHandle()) return;
+
+        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result{};
+
+        auto* args = RE::MakeFunctionArguments(
+            static_cast<std::int32_t>(modifierIndex),
+            static_cast<float>(value));
+
+        vm->DispatchMethodCall(
+            handle,
+            RE::BSFixedString("Actor"),
+            RE::BSFixedString("SetExpressionModifier"),
+            args,
+            result);
+    }
+
+
     static void Papyrus_FBClearMorphs(RE::Actor* actor, bool logOps)
     {
         if (!actor) {
@@ -153,6 +268,98 @@ namespace
             spdlog::info("[FB] MorphBridgeCall: FBClearMorphs={} key='{}'", ok, FB::Morph::kMorphKey);
         }
     }
+
+    static std::optional<std::int32_t> TryGetPhonemeIndex(std::string_view name)
+    {
+        using sv = std::string_view;
+        // Exact match only (case-sensitive)
+        if (name == sv{ "Aah" })    return 0;
+        if (name == sv{ "BigAah" }) return 1;
+        if (name == sv{ "BMP" })    return 2;
+        if (name == sv{ "ChJSh" })  return 3;
+        if (name == sv{ "DST" })    return 4;
+        if (name == sv{ "Eee" })    return 5;
+        if (name == sv{ "Eh" })     return 6;
+        if (name == sv{ "FV" })     return 7;
+        if (name == sv{ "I" })      return 8;
+        if (name == sv{ "K" })      return 9;
+        if (name == sv{ "N" })      return 10;
+        if (name == sv{ "Oh" })     return 11;
+        if (name == sv{ "OohQ" })   return 12;
+        if (name == sv{ "R" })      return 13;
+        if (name == sv{ "Th" })     return 14;
+        if (name == sv{ "W" })      return 15;
+        return std::nullopt;
+    }
+
+    static float Normalize01(float v)
+    {
+        // Allow authoring either 0..1 or 0..100
+        if (v > 1.0f) {
+            v /= 100.0f;
+        }
+        return std::clamp(v, 0.0f, 1.0f);
+    }
+
+
+
+    static std::optional<std::int32_t> TryGetMoodId(std::string_view name)
+    {
+        using sv = std::string_view;
+        if (name == sv{ "Neutral" })   return 7;
+        if (name == sv{ "Anger" })     return 8;
+        if (name == sv{ "Fear" })      return 9;
+        if (name == sv{ "Happy" })     return 10;
+        if (name == sv{ "Sad" })       return 11;
+        if (name == sv{ "Surprise" })  return 12;
+        if (name == sv{ "Puzzled" })   return 13;
+        if (name == sv{ "Disgusted" }) return 14;
+        return std::nullopt;
+    }
+
+    static std::int32_t NormalizeStrength100(float v)
+    {
+        // Allow 0..1 or 0..100
+        if (v <= 1.0f) {
+            v *= 100.0f;
+        }
+        auto i = static_cast<std::int32_t>(std::lround(v));
+        return std::clamp(i, 0, 100);
+    }
+
+    static std::optional<std::int32_t> TryGetModifierIndex(std::string_view name)
+    {
+        using sv = std::string_view;
+
+        // Eyes / look
+        if (name == sv{ "BlinkL" } || name == sv{ "BlinkLeft" })   return 0;
+        if (name == sv{ "BlinkR" } || name == sv{ "BlinkRight" })  return 1;
+        if (name == sv{ "LookDown" })  return 8;
+        if (name == sv{ "LookLeft" })  return 9;
+        if (name == sv{ "LookRight" }) return 10;
+        if (name == sv{ "LookUp" })    return 11;
+
+        if (name == sv{ "SquintL" } || name == sv{ "SquintLeft" })  return 12;
+        if (name == sv{ "SquintR" } || name == sv{ "SquintRight" }) return 13;
+
+        // Brows
+        if (name == sv{ "BrowDownL" } || name == sv{ "BrowDownLeft" })   return 2;
+        if (name == sv{ "BrowDownR" } || name == sv{ "BrowDownRight" })  return 3;
+        if (name == sv{ "BrowInL" } || name == sv{ "BrowInLeft" })     return 4;
+        if (name == sv{ "BrowInR" } || name == sv{ "BrowInRight" })    return 5;
+        if (name == sv{ "BrowUpL" } || name == sv{ "BrowUpLeft" })     return 6;
+        if (name == sv{ "BrowUpR" } || name == sv{ "BrowUpRight" })    return 7;
+
+        // Optional head modifiers (if you want them later)
+        // if (name == sv{"HeadPitch"}) return 14;
+        // if (name == sv{"HeadRoll"})  return 15;
+        // if (name == sv{"HeadYaw"})   return 16;
+
+        return std::nullopt;
+    }
+
+
+
 
     //
     // Sticky worker – keeps reapplying the current morph value AND drives the tween.
@@ -237,14 +444,46 @@ namespace
                     continue;
                 }
 
-                task->AddTask([actor, morphNameCopy, valueToApply]() {
+                const float valueCopy = valueToApply;          // or whatever your float is called
+
+                task->AddTask([actor, morphNameCopy, valueCopy]() {
                     auto aa = actor.get();
                     if (!aa) {
                         return;
                     }
-                    // No logging here to avoid spam – this is just keeping the value alive / tweened.
-                    Papyrus_FBSetMorph(aa.get(), morphNameCopy.c_str(), valueToApply, false);
+
+                    // 1) Phonemes
+                    if (auto idx = TryGetPhonemeIndex(morphNameCopy); idx) {
+                        Papyrus_ActorSetExpressionPhoneme(aa.get(), *idx, Normalize01(valueCopy), false);
+                        return;
+                    }
+
+                    // 2) Eye/Brow/Look modifiers (blink/look up/down/etc)
+                    if (auto midx = TryGetModifierIndex(morphNameCopy); midx) {
+                        // Convention: treat like 0..100 unless authored as 0..1
+                        float v = valueCopy;
+                        if (v > 1.0f) v /= 100.0f;
+                        v = std::clamp(v, 0.0f, 1.0f);
+
+                        Papyrus_ActorSetExpressionModifier(aa.get(), *midx, v, false);
+                        return;
+                    }
+
+                    // 3) Mood expressions (Happy/Sad/etc)
+                    if (auto mood = TryGetMoodId(morphNameCopy); mood) {
+                        Papyrus_ActorSetExpressionOverride(aa.get(), *mood, NormalizeStrength100(valueCopy), false);
+                        return;
+                    }
+
+                    // 4) Default: keep the original working bridge behavior
+                    Papyrus_FBSetMorph(aa.get(), morphNameCopy.c_str(), valueCopy, false);
                     });
+
+
+
+
+
+
             }
 
             // Mark not running and clean up entry if it’s still current
@@ -276,20 +515,23 @@ namespace
 
 namespace FB::Morph
 {
-    void FB::Morph::AddDelta(RE::ActorHandle actor, std::string_view morphKey, float delta, bool logOps)
+    void AddDelta(RE::ActorHandle actor, std::string_view morphKey, float delta, bool logOps)
     {
         auto a = actor.get();
         if (!a) {
             return;
         }
 
-        const char* morphName = ResolveRaceMenuMorphName(morphKey);
-        if (!morphName || morphName[0] == '\0') {
+        const std::string morphName = ResolveRaceMenuMorphName(morphKey);
+        if (morphName.empty()) {
             if (logOps) {
-                spdlog::warn("[FB] Morph: unknown MorphKey '{}'", std::string(morphKey));
+                spdlog::warn("[FB] Morph: failed to resolve morph key '{}'", std::string(morphKey));
             }
             return;
         }
+
+        
+
 
         float newValue = 0.0f;
         const std::uint32_t formID = a->GetFormID();
@@ -312,11 +554,11 @@ namespace FB::Morph
             if (!entry) {
                 entry = std::make_shared<StickyEntry>();
                 entry->logicalKey = keyStr;
-                entry->rmMorphName = morphName;
+                
                 entry->intervalSeconds = 0.05f;   // 20 Hz
                 entry->value = prevValue;         // start from previous logical value, not 0
             }
-
+            entry->rmMorphName = morphName;
             // Start (or restart) tween from prevValue -> newValue
             entry->fromValue = prevValue;
             entry->toValue = newValue;
@@ -331,6 +573,8 @@ namespace FB::Morph
             }
         }
 
+        
+
         if (logOps) {
             spdlog::info(
                 "[FB] Morph: AddDelta actor='{}' morph='{}' delta={} -> value={}",
@@ -339,7 +583,6 @@ namespace FB::Morph
                 delta,
                 newValue);
         }
-
         // Ensure the sticky worker is running for this actor+morph
         std::shared_ptr<StickyEntry> entryCopy;
         {
@@ -355,6 +598,8 @@ namespace FB::Morph
         if (entryCopy) {
             EnsureStickyWorker(actor, formID, entryCopy, logOps);
         }
+        
+
     }
 
 
@@ -374,6 +619,7 @@ namespace FB::Morph
         }
 
         if (auto* task = SKSE::GetTaskInterface()) {
+
             task->AddTask([actor, logOps]() {
                 auto aa = actor.get();
                 if (!aa) {
